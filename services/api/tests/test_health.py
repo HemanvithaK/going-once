@@ -1,18 +1,6 @@
-from collections.abc import AsyncIterator
 from unittest.mock import patch
 
 import httpx
-import pytest
-
-from app.main import app
-
-
-@pytest.fixture
-async def client() -> AsyncIterator[httpx.AsyncClient]:
-    """Talks to the app in-process — no server, no port, no network."""
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 async def test_healthz_is_ok(client: httpx.AsyncClient) -> None:
