@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.listing import Listing, ListingStatus
 from app.models.user import User
@@ -18,6 +18,13 @@ class ListingCreate(BaseModel):
     bid_increment: Decimal = Field(default=Decimal("1.00"), gt=0, decimal_places=2, max_digits=12)
     starts_at: datetime
     ends_at: datetime
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def timezone_is_required(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("must include a timezone offset, such as +00:00")
+        return value
 
     @model_validator(mode="after")
     def check_coherent(self) -> "ListingCreate":
@@ -38,6 +45,22 @@ class ListingUpdate(BaseModel):
     bid_increment: Decimal | None = Field(default=None, gt=0, decimal_places=2, max_digits=12)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+
+    @field_validator("title", "description", "start_price", "bid_increment", "starts_at", "ends_at")
+    @classmethod
+    def cannot_be_cleared(cls, value: object) -> object:
+        # Only reserve_price may be sent as null: "no reserve" is a real state.
+        # Every other column is NOT NULL in the database.
+        if value is None:
+            raise ValueError("this field cannot be cleared")
+        return value
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def timezone_is_required(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("must include a timezone offset, such as +00:00")
+        return value
 
 
 class ListingOut(BaseModel):

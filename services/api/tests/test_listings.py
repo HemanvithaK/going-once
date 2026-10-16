@@ -292,3 +292,40 @@ async def test_mine_includes_drafts_and_excludes_other_sellers(
 
     titles = [item["title"] for item in (await client.get("/listings/mine", headers=seller)).json()]
     assert titles == ["my draft"]
+
+# --- timezones ------------------------------------------------------------
+
+
+def naive_time(days: float) -> str:
+    """An ISO time with no offset, like '2026-10-20T10:00:00'. These must be rejected."""
+    return (datetime.now(UTC) + timedelta(days=days)).replace(tzinfo=None).isoformat()
+
+
+async def test_create_rejects_a_time_with_no_timezone(client: httpx.AsyncClient) -> None:
+    headers = await make_user(client, "seller@example.com")
+    response = await client.post(
+        "/listings",
+        json=listing_body(starts_at=naive_time(-0.1), ends_at=naive_time(2)),
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_cannot_clear_a_required_field(client: httpx.AsyncClient) -> None:
+    headers = await make_user(client, "seller@example.com")
+    listing = await create_listing(client, headers)
+    response = await client.patch(
+        f"/listings/{listing['id']}", json={"title": None}, headers=headers
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_rejects_a_time_with_no_timezone(client: httpx.AsyncClient) -> None:
+    headers = await make_user(client, "seller@example.com")
+    listing = await create_listing(client, headers)
+    response = await client.patch(
+        f"/listings/{listing['id']}",
+        json={"starts_at": naive_time(-0.1)},
+        headers=headers,
+    )
+    assert response.status_code == 422

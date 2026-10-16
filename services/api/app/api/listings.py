@@ -58,19 +58,22 @@ async def _get_visible_listing(
     """Load a listing the viewer is allowed to see, or 404."""
     listing = await session.scalar(select(Listing).where(Listing.id == listing_id))
     if listing is None:
-        raise _NOT_FOUND
+        raise _not_found()
     is_seller = viewer is not None and viewer.id == listing.seller_id
     if listing.status not in _PUBLIC_STATUSES and not is_seller:
         # 404, not 403: a stranger should not learn that a draft exists.
-        raise _NOT_FOUND
+        raise _not_found()
     return listing
 
+def _not_found() -> HTTPException:
+    """A fresh 404 per request: a shared exception object keeps growing its traceback."""
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="listing not found")
 
 async def _get_own_listing(session: AsyncSession, listing_id: uuid.UUID, user: User) -> Listing:
     """Load a listing the caller owns, or 404."""
     listing = await session.scalar(select(Listing).where(Listing.id == listing_id))
     if listing is None or listing.seller_id != user.id:
-        raise _NOT_FOUND
+        raise _not_found()
     return listing
 
 
