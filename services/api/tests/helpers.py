@@ -47,3 +47,17 @@ async def create_live_listing(
     assert response.status_code == 200, response.text
     published: dict[str, Any] = response.json()
     return published
+
+
+async def place_bid(
+    client: httpx.AsyncClient,
+    listing_id: str,
+    headers: dict[str, str],
+    amount: str,
+    key: str,
+) -> httpx.Response:
+    return await client.post(
+        f"/listings/{listing_id}/bids",
+        json={"max_amount": amount},
+        headers={**headers, "Idempotency-Key": key},
+    )
