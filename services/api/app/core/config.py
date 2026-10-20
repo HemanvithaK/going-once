@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
+    # Anti-snipe: a bid this close to the deadline pushes the deadline out.
+    anti_snipe_seconds: int = 30
+    # How long the closer sleeps when there is nothing due to close.
+    closer_poll_seconds: float = 1.0
+
 
 @lru_cache
 def get_settings() -> Settings:

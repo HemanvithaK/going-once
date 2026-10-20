@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, SessionDep, bearer_scheme, get_current_user
@@ -105,7 +105,11 @@ async def browse_listings(
     cursor: str | None = None,
 ) -> ListingPage:
     """Live listings, soonest to close first, cursor-paginated."""
-    query = select(Listing).where(Listing.status == ListingStatus.LIVE)
+    # Hide auctions whose deadline has passed, even before the closer marks them.
+    query = select(Listing).where(
+        Listing.status == ListingStatus.LIVE,
+        Listing.ends_at > func.now(),
+    )
 
     if cursor is not None:
         try:
