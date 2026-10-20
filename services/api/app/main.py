@@ -9,6 +9,7 @@ from app.api.bids import router as bids_router
 from app.api.listings import router as listings_router
 from app.core.db import engine
 from app.core.logging import configure_logging, get_logger
+from app.core.redis import close_redis
 
 log = get_logger(__name__)
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("startup")
     yield
     await engine.dispose()
+    await close_redis()
     log.info("shutdown")
 
 
