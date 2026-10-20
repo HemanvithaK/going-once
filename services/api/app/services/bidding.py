@@ -31,7 +31,7 @@ class BidResult:
     is_leading: bool
 
 
-async def _current_leader(session: AsyncSession, listing_id: uuid.UUID) -> Bid | None:
+async def current_leader(session: AsyncSession, listing_id: uuid.UUID) -> Bid | None:
     """The bid with the highest ceiling. A tie goes to whoever bid first."""
     return await session.scalar(
         select(Bid)
@@ -66,7 +66,7 @@ async def place_bid(
     if previous is not None:
         if previous.listing_id != listing.id or previous.max_amount != max_amount:
             raise BidError(409, "idempotency key was already used for a different bid")
-        leader = await _current_leader(session, listing.id)
+        leader = await current_leader(session, listing.id)
         return BidResult(
             bid=previous,
             listing=listing,
@@ -81,7 +81,7 @@ async def place_bid(
     if datetime.now(UTC) >= listing.ends_at:
         raise BidError(409, "auction has ended")
 
-    leader = await _current_leader(session, listing.id)
+    leader = await current_leader(session, listing.id)
     if leader is None:
         minimum = listing.start_price
     elif leader.bidder_id == bidder.id:
