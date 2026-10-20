@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.events import queue_event
 from app.core.logging import get_logger
 from app.models.bid import Bid
 from app.models.listing import Listing, ListingStatus
@@ -155,4 +156,5 @@ async def place_bid(
         bidder_id=str(bidder.id),
         current_price=str(new_price),
     )
+    queue_event(session, listing)
     return BidResult(bid=bid, listing=listing, is_leading=new_leader_id == bidder.id)

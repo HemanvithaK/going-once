@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import get_settings
+from app.core.events import publish_pending
 
 
 class Base(DeclarativeBase):
@@ -24,7 +25,10 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """One session per request: commit on success, roll back on any error."""
+    """One session per request: commit on success, roll back on any error.
+
+    Events are sent only after the commit succeeds. An error skips the send.
+    """
     async with SessionLocal() as session:
         try:
             yield session
@@ -32,3 +36,4 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+        await publish_pending(session)
