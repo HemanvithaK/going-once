@@ -1,7 +1,7 @@
 """create bids table
 
 Revision ID: 879fed5476d7
-Revises: d3d373dcec66
+Revises: f3c13c4b7815
 Create Date: 2026-10-16 22:18:48.205834+00:00
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "879fed5476d7"
-down_revision: str | None = "d3d373dcec66"
+down_revision: str | None = "f3c13c4b7815"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
