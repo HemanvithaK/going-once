@@ -14,11 +14,13 @@ anything it has already applied.
 import argparse
 import asyncio
 import json
+import time
 from contextlib import suppress
+from datetime import timedelta
 from typing import Protocol
 
 from aiokafka import AIOKafkaProducer
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -33,6 +35,9 @@ _settings = get_settings()
 RELAY_LOCK_KEY = 704_102_201
 BATCH_SIZE = 100
 RELAY_POLL_SECONDS = 1.0
+# Sent rows are kept this long, for debugging, then deleted. Unsent rows never are.
+OUTBOX_RETENTION = timedelta(hours=24)
+PURGE_EVERY_SECONDS = 60.0
 
 
 class Sender(Protocol):
@@ -108,6 +113,35 @@ async def relay_once(
     return len(rows)
 
 
+async def purge_sent_events(
+    session_factory: async_sessionmaker[AsyncSession] = SessionLocal,
+    older_than: timedelta = OUTBOX_RETENTION,
+) -> int:
+    """Delete sent rows older than the retention window. Returns how many went."""
+    async with session_factory() as session, session.begin():
+        deleted = await session.scalars(
+            delete(OutboxEvent)
+            .where(
+                # The WHERE clause requires a sent row. An unsent row never matches.
+                OutboxEvent.published_at.is_not(None),
+                OutboxEvent.published_at < func.clock_timestamp() - older_than,
+            )
+            .returning(OutboxEvent.id)
+        )
+        return len(list(deleted))
+
+
+async def _purge_safely() -> None:
+    """Cleanup must never stop the relay. A failed purge is simply tried again later."""
+    try:
+        removed = await purge_sent_events()
+    except Exception as exc:
+        log.warning("outbox_purge_failed", error=str(exc) or type(exc).__name__)
+        return
+    if removed:
+        log.info("outbox_purged", count=removed)
+
+
 async def run_relay(
     producer: Sender,
     *,
@@ -131,6 +165,7 @@ async def run_relay(
                 sent = await relay_once(producer)
                 log.info("relay_once_done", sent=sent)
                 return
+            next_purge = time.monotonic()
             while True:
                 try:
                     sent = await relay_once(producer)
@@ -138,6 +173,10 @@ async def run_relay(
                     # Kafka is down or refused a send. The events stay in the outbox.
                     log.warning("relay_cycle_failed", error=str(exc) or type(exc).__name__)
                     sent = 0
+                # Checked on every cycle, so a busy relay that never goes idle still cleans up.
+                if time.monotonic() >= next_purge:
+                    await _purge_safely()
+                    next_purge = time.monotonic() + PURGE_EVERY_SECONDS
                 if sent == 0:
                     await asyncio.sleep(poll_seconds)
         finally:

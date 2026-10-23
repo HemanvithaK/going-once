@@ -11,6 +11,7 @@ message carries the full state and its version.
 
 import asyncio
 import json
+from collections import OrderedDict
 from contextlib import suppress
 from typing import Any
 
@@ -26,16 +27,18 @@ _settings = get_settings()
 
 # Every consumer process in this group shares the topic's partitions.
 CONSUMER_GROUP = "realtime"
+# Memory bound for the version map. Forgetting a listing only costs a duplicate forward.
+MAX_TRACKED_LISTINGS = 10_000
 
 
 class Forwarder:
     """Sends each event to its listing's Redis channel, unless a newer one already went out."""
 
-    def __init__(self) -> None:
-        # The newest version this process has forwarded, per listing. An older
-        # version that arrives later is stale, so it is skipped. The map grows
-        # with the number of listings. That is fine for now.
-        self._latest: dict[str, int] = {}
+    def __init__(self, max_listings: int = MAX_TRACKED_LISTINGS) -> None:
+        self._max_listings = max_listings
+        # The newest version this process has forwarded, per listing, least recently
+        # used first. An older version that arrives later is stale, so it is skipped.
+        self._latest: OrderedDict[str, int] = OrderedDict()
 
     async def handle(self, raw: bytes) -> bool:
         """Forward one event. Returns False when it was skipped."""
@@ -56,6 +59,10 @@ class Forwarder:
         # version is recorded only after Redis accepted it.
         await redis_client.publish(listing_channel(listing_id), json.dumps(event))
         self._latest[listing_id] = version
+        self._latest.move_to_end(listing_id)
+        if len(self._latest) > self._max_listings:
+            # Forget the listing that has gone longest without an event.
+            self._latest.popitem(last=False)
         return True
 
 
