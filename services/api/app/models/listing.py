@@ -57,6 +57,10 @@ class Listing(Base):
     # the same transaction that inserts a bid.
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
 
+    # Bumped by every change, inside the same transaction. Consumers use it to
+    # tell a newer event from an older one (Part D).
+    version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Mutable: an anti-snipe bid pushes this out.
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
