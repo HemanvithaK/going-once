@@ -1,11 +1,33 @@
+import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
-import httpx
-import pytest
-from sqlalchemy import text
+# Tests can run against their own database. When TEST_DATABASE_URL is set, it
+# replaces DATABASE_URL before the app is imported. The running API and relay keep
+# the main database, so the tests never share rows with them. Advisory locks are
+# scoped to a database too, so the relay's lock tests need this as well.
+_test_database_url = os.environ.get("TEST_DATABASE_URL")
+if _test_database_url:
+    os.environ["DATABASE_URL"] = _test_database_url
 
-from app.core.db import SessionLocal, engine
-from app.main import app
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+from app.core.db import SessionLocal, engine  # noqa: E402
+from app.main import app  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _migrate_database() -> None:
+    """Bring the database the tests use up to the newest migration before any test runs."""
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+    )
 
 
 @pytest.fixture(autouse=True)
