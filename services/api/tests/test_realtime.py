@@ -10,7 +10,7 @@ from datetime import timedelta
 import httpx
 import pytest
 import uvicorn
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -19,8 +19,10 @@ from app.core.events import listing_channel
 from app.core.listing_hub import listing_hub
 from app.main import app
 from app.models.listing import Listing
+from app.models.outbox import OutboxEvent
 from app.services.closing import close_all_due
 from tests.helpers import create_listing, create_live_listing, make_user, place_bid
+from tests.pipeline import deliver_outbox
 
 RECEIVE_TIMEOUT = 3.0
 QUIET_PERIOD = 0.5
@@ -156,6 +158,7 @@ async def test_a_bid_is_pushed_to_a_connected_watcher(
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
     await place_bid(client, lid, alice, "120.00", "ws-push-alice")
+    await deliver_outbox()  # Alice's bid is old news: send it before anyone connects
 
     async with connect(f"{server_url}/ws/listings/{lid}") as ws:
         snapshot = json.loads(await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT))
@@ -164,6 +167,7 @@ async def test_a_bid_is_pushed_to_a_connected_watcher(
         # Bob's bid of 150 beats Alice's 120 ceiling, so the price moves to 125.
         response = await place_bid(client, lid, bob, "150.00", "ws-push-bob")
         assert response.status_code == 201, response.text
+        await deliver_outbox()
 
         update_message = json.loads(await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT))
 
@@ -181,6 +185,7 @@ async def test_a_bid_accepted_by_one_instance_reaches_a_viewer_on_another(
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
     await place_bid(client, lid, alice, "120.00", "xinst-alice")
+    await deliver_outbox()
 
     async with connect(f"{ws_url}/ws/listings/{lid}") as ws:  # viewer on instance B
         await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT)  # snapshot
@@ -188,6 +193,7 @@ async def test_a_bid_accepted_by_one_instance_reaches_a_viewer_on_another(
         async with httpx.AsyncClient(base_url=api_url) as remote:  # bid on instance A
             response = await place_bid(remote, lid, bob, "150.00", "xinst-bob")
         assert response.status_code == 201, response.text
+        await deliver_outbox()
 
         update_message = json.loads(await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT))
 
@@ -204,6 +210,7 @@ async def test_a_rejected_bid_sends_nothing_to_a_watcher(
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
     await place_bid(client, lid, alice, "120.00", "reject-alice")
+    await deliver_outbox()
 
     async with connect(f"{server_url}/ws/listings/{lid}") as ws:
         await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT)  # snapshot
@@ -211,6 +218,7 @@ async def test_a_rejected_bid_sends_nothing_to_a_watcher(
         # The minimum is 105, so 102 is refused and the transaction rolls back.
         response = await place_bid(client, lid, bob, "102.00", "reject-bob")
         assert response.status_code == 409
+        await deliver_outbox()
 
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(ws.recv(), timeout=QUIET_PERIOD)
@@ -225,12 +233,14 @@ async def test_closing_an_auction_sends_its_final_status_to_watchers(
     lid = listing["id"]
     await place_bid(client, lid, alice, "150.00", "final-alice")
     await set_deadline_past(lid)
+    await deliver_outbox()
 
     async with connect(f"{server_url}/ws/listings/{lid}") as ws:
         snapshot = json.loads(await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT))
         assert snapshot["status"] == "live"
 
         assert await close_all_due() == 1
+        await deliver_outbox()
         final = json.loads(await asyncio.wait_for(ws.recv(), timeout=RECEIVE_TIMEOUT))
 
     assert final["listing_id"] == lid
@@ -256,6 +266,7 @@ async def test_a_viewer_that_stops_reading_does_not_hold_back_another(
         for i in range(20):
             response = await place_bid(client, lid, alice, f"{120 + 5 * i}.00", f"healthy-{i:03d}")
             assert response.status_code == 201, response.text
+        await deliver_outbox()
 
         for _ in range(20):
             await asyncio.wait_for(healthy.recv(), timeout=RECEIVE_TIMEOUT)
@@ -273,6 +284,7 @@ async def test_a_reconnecting_viewer_gets_one_fresh_snapshot_and_no_replay(
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
     await place_bid(client, lid, alice, "120.00", "reconnect-alice")
+    await deliver_outbox()
 
     async with connect(f"{server_url}/ws/listings/{lid}") as first:
         first_snapshot = json.loads(await asyncio.wait_for(first.recv(), timeout=RECEIVE_TIMEOUT))
@@ -280,6 +292,7 @@ async def test_a_reconnecting_viewer_gets_one_fresh_snapshot_and_no_replay(
 
     # Nobody is watching while Bob bids. The viewer has to catch up on reconnect.
     await place_bid(client, lid, bob, "150.00", "reconnect-bob")
+    await deliver_outbox()  # goes out to no one
 
     async with connect(f"{server_url}/ws/listings/{lid}") as second:
         snapshot = json.loads(await asyncio.wait_for(second.recv(), timeout=RECEIVE_TIMEOUT))
@@ -311,3 +324,26 @@ async def test_a_draft_listing_looks_missing_to_watchers(
 
     assert closed.value.rcvd is not None
     assert closed.value.rcvd.code == 4404
+
+
+async def test_a_201_means_the_bid_is_already_committed(
+    client: httpx.AsyncClient, two_api_instances: tuple[str, str]
+) -> None:
+    api_url, _ = two_api_instances
+    seller = await make_user(client, "seller@example.com")
+    bob = await make_user(client, "bob@example.com")
+    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
+    lid = listing["id"]
+
+    # Real HTTP to a separate server process. The in-process test client waits for the
+    # whole request, so it cannot show a response that leaves before its commit.
+    async with httpx.AsyncClient(base_url=api_url) as real:
+        response = await place_bid(real, lid, bob, "150.00", "committed-bob")
+    assert response.status_code == 201, response.text
+
+    # The client has its answer, so the outbox row must already be visible to everyone else.
+    async with SessionLocal() as session:
+        written = await session.scalar(
+            select(func.count()).select_from(OutboxEvent).where(OutboxEvent.partition_key == lid)
+        )
+    assert written == 1

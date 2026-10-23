@@ -14,7 +14,10 @@ from app.models.user import User, UserRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+# scope="function": get_session commits when the endpoint returns, before the response
+# goes out. The default ("request") commits after the response has been sent, so a client
+# could see 201 and read the database before the change existed.
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
 CredentialsDep = Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)]
 
 _UNAUTHORIZED = HTTPException(

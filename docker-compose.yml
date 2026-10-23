@@ -79,5 +79,20 @@ services:
       db: {condition: service_healthy}
       kafka-init: {condition: service_completed_successfully}
 
+  consumer:
+    build: ./services/api
+    command: python -m app.workers.consumer
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:

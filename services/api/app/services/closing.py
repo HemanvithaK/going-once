@@ -3,6 +3,9 @@
 Each close is one database transaction. Either the listing becomes SOLD or
 UNSOLD together with its order (if any), or nothing changes and the auction
 stays LIVE for the next closer to try. A crash in the middle is a rollback.
+
+The outbox row for the change is written in the same transaction, so the
+announcement exists if and only if the close happened.
 """
 
 import uuid
@@ -12,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.db import SessionLocal
-from app.core.events import publish_pending, queue_event
+from app.core.events import queue_event
 from app.core.logging import get_logger
 from app.models.listing import Listing, ListingStatus
 from app.models.order import Order
@@ -25,25 +28,22 @@ async def close_next_due(
     session_factory: async_sessionmaker[AsyncSession] = SessionLocal,
 ) -> bool:
     """Close the most overdue auction. Returns False when nothing is due."""
-    async with session_factory() as session:
-        async with session.begin():
-            listing = await session.scalar(
-                select(Listing)
-                .where(
-                    Listing.status == ListingStatus.LIVE,
-                    Listing.ends_at <= func.clock_timestamp(),
-                )
-                .order_by(Listing.ends_at, Listing.id)
-                .limit(1)
-                # SKIP LOCKED: a row another closer already holds is skipped, not
-                # waited on. Many closers can run side by side without queueing.
-                .with_for_update(skip_locked=True)
+    async with session_factory() as session, session.begin():
+        listing = await session.scalar(
+            select(Listing)
+            .where(
+                Listing.status == ListingStatus.LIVE,
+                Listing.ends_at <= func.clock_timestamp(),
             )
-            if listing is None:
-                return False
-            await _settle(session, listing)
-        # The transaction has committed. Only now is it safe to announce the change.
-        await publish_pending(session)
+            .order_by(Listing.ends_at, Listing.id)
+            .limit(1)
+            # SKIP LOCKED: a row another closer already holds is skipped, not
+            # waited on. Many closers can run side by side without queueing.
+            .with_for_update(skip_locked=True)
+        )
+        if listing is None:
+            return False
+        await _settle(session, listing)
     return True
 
 
