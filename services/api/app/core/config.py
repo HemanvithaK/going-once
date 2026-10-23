@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # How long the closer sleeps when there is nothing due to close.
     closer_poll_seconds: float = 1.0
 
+    # Kafka broker list, "host:port" separated by commas. Used from Part B on,
+    # when the relay sends outbox events to Kafka.
+    kafka_bootstrap_servers: str = "localhost:9092"
+
 
 @lru_cache
 def get_settings() -> Settings:
