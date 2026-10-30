@@ -1,0 +1,1 @@
+"""Configuration, database, and logging for the bidding service."""
