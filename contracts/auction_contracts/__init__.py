@@ -1,0 +1,1 @@
+"""Event contracts shared by the going-once services."""
