@@ -15,11 +15,10 @@ import pytest
 from sqlalchemy import func, select, update
 
 from app.core.db import SessionLocal
-from app.core.events import listing_channel
+from app.core.events import LISTING_SNAPSHOTS_TOPIC, listing_channel
 from app.core.redis import redis_client
 from app.models.outbox import OutboxEvent
 from app.workers.consumer import Forwarder, _forward_until_redis_accepts
-from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.workers.relay import purge_sent_events, relay_once, run_relay
 from tests.helpers import create_live_listing, make_user, place_bid
 from tests.pipeline import LoopbackBus
