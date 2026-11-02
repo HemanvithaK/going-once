@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, SessionDep, bearer_scheme, get_current_user
 from app.api.pagination import decode_cursor, encode_cursor
+from app.core.events import queue_listing_published
 from app.core.logging import get_logger
 from app.models.listing import Listing, ListingStatus
 from app.models.user import User
@@ -207,6 +208,10 @@ async def publish_listing(
         )
 
     listing.status = ListingStatus.LIVE if listing.starts_at <= now else ListingStatus.SCHEDULED
+    # Bidding only learns about a listing that is live now. Scheduled listings need a
+    # starts_at in the contract, which it does not have yet.
+    if listing.status is ListingStatus.LIVE:
+        queue_listing_published(session, listing)
     await session.flush()
     log.info("listing_published", listing_id=str(listing.id), status=listing.status.value)
     return listing_out(listing, user)

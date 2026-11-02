@@ -103,9 +103,23 @@ def test_a_newer_schema_version_is_rejected() -> None:
         parse_event(auction_update_json(schema_version=2))
 
 
-def test_versions_start_at_one() -> None:
+def test_a_publish_is_version_zero() -> None:
+    """The listing as first published is version 0. Bids start at version 1."""
+    published = ListingPublished(
+        listing_id=LISTING_ID,
+        version=0,
+        seller_id=SELLER_ID,
+        start_price=Decimal("100.00"),
+        bid_increment=Decimal("5.00"),
+        reserve_price=None,
+        ends_at=ENDS_AT,
+    )
+    assert parse_event(published.model_dump_json()) == published
+
+
+def test_a_negative_version_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        parse_event(auction_update_json(version=0))
+        parse_event(auction_update_json(version=-1))
 
 
 def test_an_extra_field_is_rejected_not_silently_dropped() -> None:

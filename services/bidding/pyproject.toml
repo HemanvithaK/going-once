@@ -11,6 +11,8 @@ dependencies = [
     "alembic>=1.14",
     "pydantic-settings>=2.6",
     "structlog>=24.4",
+    "aiokafka>=0.11",
+    "auction-contracts>=0.1",
 ]
 
 [project.optional-dependencies]
@@ -32,5 +34,12 @@ asyncio_default_test_loop_scope = "session"
 [tool.ruff]
 line-length = 100
 
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "ASYNC", "C4", "SIM", "RUF"]
+
 [tool.mypy]
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["aiokafka", "aiokafka.*"]
+ignore_missing_imports = true

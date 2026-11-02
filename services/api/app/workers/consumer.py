@@ -18,7 +18,7 @@ from typing import Any
 from aiokafka import AIOKafkaConsumer
 
 from app.core.config import get_settings
-from app.core.events import LISTING_EVENTS_TOPIC, listing_channel
+from app.core.events import LISTING_SNAPSHOTS_TOPIC, listing_channel
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import close_redis, redis_client
 
@@ -70,7 +70,7 @@ async def start_consumer(group_id: str) -> AIOKafkaConsumer:
     """Keep trying until the broker answers, the same way the relay does."""
     while True:
         consumer = AIOKafkaConsumer(
-            LISTING_EVENTS_TOPIC,
+            LISTING_SNAPSHOTS_TOPIC,
             bootstrap_servers=_settings.kafka_bootstrap_servers,
             group_id=group_id,
             # We commit by hand, after Redis has the event.

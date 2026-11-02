@@ -8,7 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import SessionLocal
-from app.core.events import LISTING_EVENTS_TOPIC
+from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.models.listing import Listing, ListingStatus
 from app.models.outbox import OutboxEvent
 from app.services import closing
@@ -21,7 +21,10 @@ async def outbox_rows(listing_id: str) -> list[OutboxEvent]:
     async with SessionLocal() as session:
         result = await session.scalars(
             select(OutboxEvent)
-            .where(OutboxEvent.partition_key == listing_id)
+            .where(
+                OutboxEvent.partition_key == listing_id,
+                OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC,
+            )
             .order_by(OutboxEvent.payload["version"].as_integer())
         )
         return list(result)
@@ -59,7 +62,7 @@ async def test_an_accepted_bid_writes_one_outbox_row_with_the_new_state(
     rows = await outbox_rows(lid)
     assert len(rows) == 1
     row = rows[0]
-    assert row.topic == LISTING_EVENTS_TOPIC
+    assert row.topic == LISTING_SNAPSHOTS_TOPIC
     assert row.partition_key == lid
     assert row.published_at is None  # not sent yet: that is the relay's job (Part C)
     assert row.payload["version"] == 1

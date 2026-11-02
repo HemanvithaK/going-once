@@ -8,10 +8,15 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.core.db import SessionLocal, engine
-from app.core.events import LISTING_EVENTS_TOPIC
+from app.core.events import LISTING_EVENTS_TOPIC, LISTING_SNAPSHOTS_TOPIC
 from app.models.outbox import OutboxEvent
 from app.workers.relay import RELAY_LOCK_KEY, relay_once, run_relay
 from tests.helpers import create_live_listing, make_user, place_bid
+
+
+def snapshot_versions(sent: list[tuple[str, str, dict[str, Any]]]) -> list[int]:
+    """The versions sent to the viewer feed, in order. Publishes go to listing-events."""
+    return [payload["version"] for topic, _, payload in sent if topic == LISTING_SNAPSHOTS_TOPIC]
 
 
 class FakeProducer:
@@ -54,13 +59,15 @@ async def test_relay_sends_each_listing_in_version_order_and_marks_rows_sent(
     await place_bid(client, lid, bob, "150.00", "relay-bob")
 
     producer = FakeProducer()
-    assert await relay_once(producer) == 2
+    # The publish (version 0) goes to listing-events. The two bids go to the snapshot topic.
+    assert await relay_once(producer) == 3
 
     assert [(topic, key, payload["version"]) for topic, key, payload in producer.sent] == [
-        (LISTING_EVENTS_TOPIC, lid, 1),
-        (LISTING_EVENTS_TOPIC, lid, 2),
+        (LISTING_EVENTS_TOPIC, lid, 0),
+        (LISTING_SNAPSHOTS_TOPIC, lid, 1),
+        (LISTING_SNAPSHOTS_TOPIC, lid, 2),
     ]
-    assert await published_count(lid) == 2
+    assert await published_count(lid) == 3
     assert await relay_once(producer) == 0  # nothing left to send
 
 
@@ -78,14 +85,14 @@ async def test_a_failed_batch_is_sent_again_in_full(client: httpx.AsyncClient) -
     failing = FakeProducer(fail_on_send=2)
     with pytest.raises(ConnectionError):
         await relay_once(failing)
-    assert [payload["version"] for _, _, payload in failing.sent] == [1, 2]
+    assert [payload["version"] for _, _, payload in failing.sent] == [0, 1]
     assert await published_count(lid) == 0  # nothing was marked sent
 
-    # The next run sends the whole batch again. Versions 1 and 2 go out twice.
+    # The next run sends the whole batch again, the publish included.
     healthy = FakeProducer()
-    assert await relay_once(healthy) == 3
-    assert [payload["version"] for _, _, payload in healthy.sent] == [1, 2, 3]
-    assert await published_count(lid) == 3
+    assert await relay_once(healthy) == 4
+    assert [payload["version"] for _, _, payload in healthy.sent] == [0, 1, 2, 3]
+    assert await published_count(lid) == 4
 
 
 async def test_a_second_relay_does_nothing_while_the_first_holds_the_lock(
@@ -121,10 +128,10 @@ async def test_a_running_relay_sends_new_events_as_they_arrive(client: httpx.Asy
     try:
         await place_bid(client, lid, alice, "120.00", "live-relay-alice")
         for _ in range(100):  # up to about two seconds
-            if producer.sent:
+            if snapshot_versions(producer.sent):
                 break
             await asyncio.sleep(0.02)
-        assert [payload["version"] for _, _, payload in producer.sent] == [1]
+        assert snapshot_versions(producer.sent) == [1]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

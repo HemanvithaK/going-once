@@ -4,18 +4,24 @@ It runs the same relay and forwarder code as production, minus the broker. The
 broker-gated test in test_consumer.py covers the real one.
 """
 
+from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.workers.consumer import Forwarder
 from app.workers.relay import relay_once
 
 
 class LoopbackBus:
-    """Collects what the relay would have sent to Kafka."""
+    """Collects what the viewer feed would have received from Kafka.
+
+    listing-events is bidding's topic and never reaches a browser, so only the
+    snapshot topic is kept here.
+    """
 
     def __init__(self) -> None:
         self.values: list[bytes] = []
 
     async def send_and_wait(self, topic: str, *, key: bytes, value: bytes) -> object:
-        self.values.append(value)
+        if topic == LISTING_SNAPSHOTS_TOPIC:
+            self.values.append(value)
         return None
 
 

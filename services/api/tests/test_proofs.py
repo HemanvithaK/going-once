@@ -19,11 +19,12 @@ from app.core.events import listing_channel
 from app.core.redis import redis_client
 from app.models.outbox import OutboxEvent
 from app.workers.consumer import Forwarder, _forward_until_redis_accepts
+from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.workers.relay import purge_sent_events, relay_once, run_relay
 from tests.helpers import create_live_listing, make_user, place_bid
 from tests.pipeline import LoopbackBus
 from tests.test_consumer import fake_event, next_event, subscribe
-from tests.test_relay import FakeProducer, published_count
+from tests.test_relay import FakeProducer, published_count, snapshot_versions
 
 
 class FlakyProducer(FakeProducer):
@@ -57,10 +58,14 @@ async def test_two_listings_interleaved_still_go_out_in_order_for_each(
     await place_bid(client, second["id"], bob, "150.00", "order-b2")
 
     producer = FakeProducer()
-    assert await relay_once(producer) == 4
+    assert await relay_once(producer) == 6  # two publishes, four bids
 
     for listing in (first, second):
-        versions = [payload["version"] for _, key, payload in producer.sent if key == listing["id"]]
+        versions = [
+            payload["version"]
+            for topic, key, payload in producer.sent
+            if key == listing["id"] and topic == LISTING_SNAPSHOTS_TOPIC
+        ]
         assert versions == [1, 2]
 
 
@@ -83,7 +88,7 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
         # Wait for the commit, not just the sends. A send can land just before its batch
         # commits, and cancelling then would roll the batch back.
         for _ in range(750):  # up to fifteen seconds; the test is about order, not speed
-            if await published_count(lid) == 3:
+            if await published_count(lid) == 4:
                 break
             await asyncio.sleep(0.02)
     finally:
@@ -92,9 +97,9 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
             await task
 
     # Failed sends are never recorded, so the successful run is the whole batch, in order.
-    delivered = [payload["version"] for _, _, payload in producer.sent]
+    delivered = snapshot_versions(producer.sent)
     assert delivered == [1, 2, 3], f"delivered so far: {delivered}"
-    assert await published_count(lid) == 3
+    assert await published_count(lid) == 4  # the publish, then three bids
 
 
 async def test_a_redis_outage_delays_an_event_but_never_loses_it(
@@ -141,7 +146,7 @@ async def test_purge_deletes_old_sent_rows_and_nothing_else(client: httpx.AsyncC
     lid = listing["id"]
     await place_bid(client, lid, alice, "120.00", "purge-alice")
     await place_bid(client, lid, bob, "150.00", "purge-bob")
-    await relay_once(FakeProducer())  # sends versions 1 and 2
+    await relay_once(FakeProducer())  # sends the publish (version 0) and versions 1 and 2
     await place_bid(client, lid, alice, "160.00", "purge-alice-2")  # version 3 stays unsent
 
     # Version 1 was sent two days ago. Version 2 was sent just now.
@@ -158,7 +163,7 @@ async def test_purge_deletes_old_sent_rows_and_nothing_else(client: httpx.AsyncC
         remaining = list(
             await session.scalars(select(OutboxEvent).where(OutboxEvent.partition_key == lid))
         )
-    assert sorted(row.payload["version"] for row in remaining) == [2, 3]
+    assert sorted(row.payload["version"] for row in remaining) == [0, 2, 3]
 
 
 async def test_a_forgotten_listing_is_forwarded_again_rather_than_lost() -> None:

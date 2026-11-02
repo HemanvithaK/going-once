@@ -22,6 +22,7 @@ from app.models.listing import Listing
 from app.models.outbox import OutboxEvent
 from app.services.closing import close_all_due
 from tests.helpers import create_listing, create_live_listing, make_user, place_bid
+from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from tests.pipeline import deliver_outbox
 
 RECEIVE_TIMEOUT = 3.0
@@ -344,6 +345,6 @@ async def test_a_201_means_the_bid_is_already_committed(
     # The client has its answer, so the outbox row must already be visible to everyone else.
     async with SessionLocal() as session:
         written = await session.scalar(
-            select(func.count()).select_from(OutboxEvent).where(OutboxEvent.partition_key == lid)
+            select(func.count()).select_from(OutboxEvent).where(OutboxEvent.partition_key == lid, OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC)
         )
     assert written == 1

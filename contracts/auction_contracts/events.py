@@ -39,7 +39,8 @@ class _Event(BaseModel):
 
     schema_version: Literal[1] = 1
     listing_id: uuid.UUID
-    version: int = Field(ge=1)
+    # 0 is the listing as first published. Each later change to the auction adds one.
+    version: int = Field(ge=0)
 
 
 class ListingPublished(_Event):

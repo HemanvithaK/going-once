@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
+    # Where listing-events comes from.
+    kafka_bootstrap_servers: str = "localhost:9092"
+
 
 @lru_cache
 def get_settings() -> Settings:
