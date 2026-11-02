@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # Anti-snipe: a bid this close to the deadline pushes the deadline out.
     anti_snipe_seconds: int = 30
 
+    # How long the closer sleeps when nothing is due.
+    closer_poll_seconds: float = 1.0
+
     # Where listing-events comes from, and where outbox events go.
     kafka_bootstrap_servers: str = "localhost:9092"
 
