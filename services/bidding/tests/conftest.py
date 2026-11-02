@@ -11,12 +11,15 @@ _test_database_url = os.environ.get("TEST_DATABASE_URL")
 if _test_database_url:
     os.environ["DATABASE_URL"] = _test_database_url
 
-import httpx
-import pytest
-from sqlalchemy import text
+# Tests sign their own tokens with this key. A real deployment sets JWT_SECRET itself.
+os.environ.setdefault("JWT_SECRET", "test-only-signing-key-that-is-at-least-32-bytes")
 
-from app.core.db import SessionLocal, engine
-from app.main import app
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+from app.core.db import SessionLocal, engine  # noqa: E402
+from app.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -33,7 +36,7 @@ def _migrate_database() -> None:
 async def clean_tables() -> AsyncIterator[None]:
     """Start every test from empty tables."""
     async with SessionLocal() as session:
-        await session.execute(text("TRUNCATE bids, auctions CASCADE"))
+        await session.execute(text("TRUNCATE bids, auctions, outbox_events CASCADE"))
         await session.commit()
     yield
 

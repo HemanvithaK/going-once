@@ -2,5 +2,6 @@
 
 from app.models.auction import Auction
 from app.models.bid import Bid
+from app.models.outbox import OutboxEvent
 
-__all__ = ["Auction", "Bid"]
+__all__ = ["Auction", "Bid", "OutboxEvent"]

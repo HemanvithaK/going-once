@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from sqlalchemy import text
 
+from app.api.bids import router as bids_router
 from app.core.db import engine
 from app.core.logging import configure_logging, get_logger
 
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="going-once-bidding", version="0.1.0", lifespan=lifespan)
+app.include_router(bids_router)
 
 
 @app.get("/healthz", tags=["ops"])
