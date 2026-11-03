@@ -88,7 +88,7 @@ services:
       - sh
       - -c
       - |
-        for topic in listing-events listing-snapshots auction-updates auction-outcomes; do
+        for topic in listing-events auction-updates auction-outcomes; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
             --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1 || exit 1
         done
@@ -108,9 +108,8 @@ services:
     volumes: ["./services/api:/code"]
     depends_on:
       db: {condition: service_healthy}
-      redis: {condition: service_healthy}
 
-  # Sends the api's outbox (listing-events, listing-snapshots) to Kafka.
+  # Sends the api's outbox (listing-events) to Kafka.
   relay:
     build: *api-build
     user: "1000:1000"
@@ -123,19 +122,6 @@ services:
     depends_on:
       db: {condition: service_healthy}
       kafka-init: {condition: service_completed_successfully}
-
-  # listing-snapshots -> Redis, for WebSocket viewers.
-  consumer:
-    build: *api-build
-    command: python -m app.workers.consumer
-    env_file: .env
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    restart: unless-stopped
-    depends_on:
-      kafka: {condition: service_healthy}
-      kafka-init: {condition: service_completed_successfully}
-      redis: {condition: service_healthy}
 
   # auction-updates -> the api's listing copy (current price, deadline).
   auction-feed:

@@ -23,15 +23,15 @@ learns about from auction-outcomes. Bidding decides who won; it does not know ab
 
 ## Topics
 
-| Topic             | Producer | Consumer(s)                    | Audience                         |
-|-------------------|----------|--------------------------------|----------------------------------|
-| listing-events    | core api | bidding                        | private (contains reserve price) |
-| auction-updates   | bidding  | core api (listing copy)        | public (any viewer)              |
-| auction-outcomes  | bidding  | core api (status, order)       | private (names the winner)       |
-| listing-snapshots | core api | realtime (today: api consumer) | public (no reserve, no winner)   |
+| Topic             | Producer | Consumer(s)                         | Audience                         |
+|-------------------|----------|-------------------------------------|----------------------------------|
+| listing-events    | core api | bidding                             | private (contains reserve price) |
+| auction-updates   | bidding  | core api (listing copy), realtime   | public (any viewer)              |
+| auction-outcomes  | bidding  | core api (status, order)            | private (names the winner)       |
 
-listing-snapshots is temporary. It carries the core api's view of a listing to
-WebSocket viewers. When realtime reads auction-updates directly, this topic goes away.
+The core api announces one thing: a listing was published. Everything after that
+(prices, deadlines, the result) is announced by bidding. Viewers never hear from the
+core api; realtime reads auction-updates and nothing else.
 
 ## Event types
 
@@ -40,7 +40,6 @@ WebSocket viewers. When realtime reads auction-updates directly, this topic goes
 | listing.published | listing-events    | seller published; bidding starts tracking     |
 | auction.updated   | auction-updates   | the public state changed (price, status)      |
 | auction.settled   | auction-outcomes  | the auction closed: sold or unsold            |
-| listing.updated   | listing-snapshots | the api's view of a listing, for viewers      |
 
 ## Why the topics are split
 

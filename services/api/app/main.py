@@ -6,11 +6,8 @@ from sqlalchemy import text
 
 from app.api.auth import router as auth_router
 from app.api.listings import router as listings_router
-from app.api.realtime import router as realtime_router
 from app.core.db import engine
-from app.core.listing_hub import listing_hub
 from app.core.logging import configure_logging, get_logger
-from app.core.redis import close_redis
 
 log = get_logger(__name__)
 
@@ -21,9 +18,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     log.info("startup")
     yield
-    await listing_hub.close()
     await engine.dispose()
-    await close_redis()
     log.info("shutdown")
 
 
@@ -31,7 +26,6 @@ app = FastAPI(title="going-once-api", version="0.1.0", lifespan=lifespan)
 
 app.include_router(auth_router)
 app.include_router(listings_router)
-app.include_router(realtime_router)
 
 
 @app.get("/healthz", tags=["ops"])

@@ -3,14 +3,15 @@ import uuid
 from decimal import Decimal
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
-from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.models.listing import Listing, ListingStatus
 from app.models.order import Order
 from app.models.outbox import OutboxEvent
 from app.models.user import User
+from app.services import settlement
 from app.services.settlement import OutcomeResult, record_outcome
 from tests.helpers import create_live_listing, make_user
 
@@ -59,16 +60,9 @@ async def count_orders() -> int:
         return await session.scalar(select(func.count()).select_from(Order)) or 0
 
 
-async def count_snapshots() -> int:
+async def count_outbox_rows() -> int:
     async with SessionLocal() as session:
-        return (
-            await session.scalar(
-                select(func.count())
-                .select_from(OutboxEvent)
-                .where(OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC)
-            )
-            or 0
-        )
+        return await session.scalar(select(func.count()).select_from(OutboxEvent)) or 0
 
 
 async def live_listing(client: httpx.AsyncClient) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
@@ -112,32 +106,4 @@ async def test_an_unsold_outcome_marks_the_listing_unsold_with_no_order(
     assert await count_orders() == 0
 
 
-async def test_a_repeated_outcome_is_recorded_once(client: httpx.AsyncClient) -> None:
-    listing_id, _, buyer = await live_listing(client)
-    raw = settled(listing_id, status="sold", winner=buyer, price="125.00")
-
-    assert await apply(raw) is OutcomeResult.RECORDED
-    assert await apply(raw) is OutcomeResult.ALREADY_SETTLED
-    assert await count_orders() == 1
-
-
-async def test_an_outcome_for_an_unknown_listing_changes_nothing() -> None:
-    result = await apply(settled(uuid.uuid4(), status="unsold"))
-
-    assert result is OutcomeResult.UNKNOWN_LISTING
-    assert await count_orders() == 0
-
-
-async def test_a_malformed_outcome_is_skipped() -> None:
-    assert await apply(b"not json at all") is OutcomeResult.MALFORMED
-
-
-async def test_a_recorded_outcome_queues_a_snapshot_for_viewers(
-    client: httpx.AsyncClient,
-) -> None:
-    listing_id, _, _ = await live_listing(client)
-    before = await count_snapshots()
-
-    assert await apply(settled(listing_id, status="unsold")) is OutcomeResult.RECORDED
-
-    assert await count_snapshots() == before + 1
+async def test_a_repeated_outcome_is_recorded_once(client:

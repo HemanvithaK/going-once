@@ -12,7 +12,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.events import queue_event
 from app.core.logging import get_logger
 from app.models.listing import Listing, ListingStatus
 from app.models.order import Order
@@ -68,6 +67,5 @@ async def record_outcome(session: AsyncSession, raw: bytes | str) -> OutcomeResu
     else:
         listing.status = ListingStatus.UNSOLD
 
-    # Viewers learn the result through the same snapshot path as every other change.
-    queue_event(session, listing)
+    # Nothing is announced from here. Viewers hear about the sale from bidding.
     return OutcomeResult.RECORDED

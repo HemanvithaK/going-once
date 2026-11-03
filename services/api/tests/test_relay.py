@@ -8,15 +8,10 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.core.db import SessionLocal, engine
-from app.core.events import LISTING_EVENTS_TOPIC, LISTING_SNAPSHOTS_TOPIC
+from app.core.events import LISTING_EVENTS_TOPIC
 from app.models.outbox import OutboxEvent
 from app.workers.relay import RELAY_LOCK_KEY, relay_once, run_relay
-from tests.helpers import create_live_listing, feed_auction_update, make_user
-
-
-def snapshot_versions(sent: list[tuple[str, str, dict[str, Any]]]) -> list[int]:
-    """The versions sent to the viewer feed, in order. Publishes go to listing-events."""
-    return [payload["version"] for topic, _, payload in sent if topic == LISTING_SNAPSHOTS_TOPIC]
+from tests.helpers import create_live_listing, make_user
 
 
 class FakeProducer:
@@ -34,6 +29,16 @@ class FakeProducer:
         return None
 
 
+async def total_published_count() -> int:
+    async with SessionLocal() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(OutboxEvent.published_at.is_not(None))
+        )
+    return int(count or 0)
+
+
 async def published_count(listing_id: str) -> int:
     async with SessionLocal() as session:
         count = await session.scalar(
@@ -47,56 +52,55 @@ async def published_count(listing_id: str) -> int:
     return int(count or 0)
 
 
-async def test_relay_sends_each_listing_in_version_order_and_marks_rows_sent(
+async def publish_listings(client: httpx.AsyncClient, count: int) -> list[str]:
+    """Publish `count` listings, which queues one listing-events row for each."""
+    seller = await make_user(client, "seller@example.com")
+    ids = []
+    for _ in range(count):
+        listing = await create_live_listing(client, seller)
+        ids.append(listing["id"])
+    return ids
+
+
+async def test_relay_sends_each_published_listing_and_marks_the_rows_sent(
     client: httpx.AsyncClient,
 ) -> None:
-    seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
-    await feed_auction_update(lid, price="120.00")
-    await feed_auction_update(lid, price="150.00")
+    first, second = await publish_listings(client, 2)
 
     producer = FakeProducer()
-    # The publish (version 0) goes to listing-events. The two updates go to the snapshot topic.
-    assert await relay_once(producer) == 3
+    assert await relay_once(producer) == 2
 
-    assert [(topic, key, payload["version"]) for topic, key, payload in producer.sent] == [
-        (LISTING_EVENTS_TOPIC, lid, 0),
-        (LISTING_SNAPSHOTS_TOPIC, lid, 1),
-        (LISTING_SNAPSHOTS_TOPIC, lid, 2),
-    ]
-    assert await published_count(lid) == 3
+    # Rows have random ids and each listing has one row, so there is no order across listings.
+    assert {(topic, key, payload["type"]) for topic, key, payload in producer.sent} == {
+        (LISTING_EVENTS_TOPIC, first, "listing.published"),
+        (LISTING_EVENTS_TOPIC, second, "listing.published"),
+    }
+    assert await published_count(first) == 1
+    assert await published_count(second) == 1
     assert await relay_once(producer) == 0  # nothing left to send
 
 
 async def test_a_failed_batch_is_sent_again_in_full(client: httpx.AsyncClient) -> None:
-    seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
-    await feed_auction_update(lid, price="120.00")
-    await feed_auction_update(lid, price="150.00")
-    await feed_auction_update(lid, price="160.00")
+    ids = await publish_listings(client, 3)
 
     # The third send fails. The first two were accepted, but the batch rolls back.
     failing = FakeProducer(fail_on_send=2)
     with pytest.raises(ConnectionError):
         await relay_once(failing)
-    assert [payload["version"] for _, _, payload in failing.sent] == [0, 1]
-    assert await published_count(lid) == 0  # nothing was marked sent
+    assert len(failing.sent) == 2
+    assert await total_published_count() == 0  # nothing was marked sent
 
-    # The next run sends the whole batch again, the publish included.
+    # The next run sends the whole batch again.
     healthy = FakeProducer()
-    assert await relay_once(healthy) == 4
-    assert [payload["version"] for _, _, payload in healthy.sent] == [0, 1, 2, 3]
-    assert await published_count(lid) == 4
+    assert await relay_once(healthy) == 3
+    assert sorted(key for _, key, _ in healthy.sent) == sorted(ids)
+    assert await total_published_count() == 3
 
 
 async def test_a_second_relay_does_nothing_while_the_first_holds_the_lock(
     client: httpx.AsyncClient,
 ) -> None:
-    seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    await feed_auction_update(listing["id"], price="120.00")
+    await publish_listings(client, 1)
 
     async with engine.connect() as holder:
         assert (
@@ -114,18 +118,16 @@ async def test_a_second_relay_does_nothing_while_the_first_holds_the_lock(
 
 async def test_a_running_relay_sends_new_events_as_they_arrive(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
 
     producer = FakeProducer()
     task = asyncio.create_task(run_relay(producer, poll_seconds=0.05))
     try:
-        await feed_auction_update(lid, price="120.00")
+        listing = await create_live_listing(client, seller)
         for _ in range(100):  # up to about two seconds
-            if snapshot_versions(producer.sent):
+            if producer.sent:
                 break
             await asyncio.sleep(0.02)
-        assert snapshot_versions(producer.sent) == [1]
+        assert [key for _, key, _ in producer.sent] == [listing["id"]]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

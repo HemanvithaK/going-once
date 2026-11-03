@@ -1,7 +1,8 @@
 """Applies bidding's auction.updated events to the listing read model the API serves.
 
 Bidding owns the price and the deadline. The API keeps a copy, so its read endpoints show
-current values, and queues a snapshot so connected viewers see the change.
+current values. Viewers do not hear about a change from here: realtime gets public
+updates straight from bidding.
 """
 
 from enum import StrEnum
@@ -11,7 +12,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.events import queue_event
 from app.core.logging import get_logger
 from app.models.listing import Listing
 
@@ -43,5 +43,4 @@ async def apply_auction_update(session: AsyncSession, raw: bytes | str) -> FeedR
 
     listing.current_price = event.current_price
     listing.ends_at = event.ends_at
-    queue_event(session, listing)
     return FeedResult.APPLIED

@@ -1,29 +1,22 @@
-"""Part E proofs: each test is one promise the outbox pipeline makes, checked directly.
+"""Proofs for the outbox pipeline: each test is one promise, checked when things go wrong.
 
-Earlier tests cover the happy path. These cover what happens when things go wrong
-in the middle: a broker outage, a Redis outage, two listings interleaved, old rows
-piling up, and memory limits.
+The happy path is covered elsewhere. These cover a broker outage in the middle of a
+batch and old rows piling up. The viewer-side proofs (Redis outages, stale versions,
+memory limits) moved to the realtime service along with the code they test.
 """
 
 import asyncio
-import uuid
 from contextlib import suppress
 from datetime import timedelta
 
 import httpx
-import pytest
 from sqlalchemy import func, select, update
 
 from app.core.db import SessionLocal
-from app.core.events import LISTING_SNAPSHOTS_TOPIC, listing_channel
-from app.core.redis import redis_client
 from app.models.outbox import OutboxEvent
-from app.workers.consumer import Forwarder, _forward_until_redis_accepts
 from app.workers.relay import purge_sent_events, relay_once, run_relay
-from tests.helpers import create_live_listing, feed_auction_update, make_user
-from tests.pipeline import LoopbackBus
-from tests.test_consumer import fake_event, next_event, subscribe
-from tests.test_relay import FakeProducer, published_count, snapshot_versions
+from tests.helpers import create_live_listing, make_user
+from tests.test_relay import FakeProducer, published_count, total_published_count
 
 
 class FlakyProducer(FakeProducer):
@@ -41,40 +34,11 @@ class FlakyProducer(FakeProducer):
         return await super().send_and_wait(topic, key=key, value=value)
 
 
-async def test_two_listings_interleaved_still_go_out_in_order_for_each(
-    client: httpx.AsyncClient,
-) -> None:
-    seller = await make_user(client, "seller@example.com")
-    first = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    second = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-
-    # Updates alternate between the two listings, so their versions interleave in the outbox.
-    await feed_auction_update(first["id"], price="120.00")
-    await feed_auction_update(second["id"], price="120.00")
-    await feed_auction_update(first["id"], price="150.00")
-    await feed_auction_update(second["id"], price="150.00")
-
-    producer = FakeProducer()
-    assert await relay_once(producer) == 6  # two publishes, four updates
-
-    for listing in (first, second):
-        versions = [
-            payload["version"]
-            for topic, key, payload in producer.sent
-            if key == listing["id"] and topic == LISTING_SNAPSHOTS_TOPIC
-        ]
-        assert versions == [1, 2]
-
-
 async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
-    await feed_auction_update(lid, price="120.00")
-    await feed_auction_update(lid, price="150.00")
-    await feed_auction_update(lid, price="160.00")
+    ids = [(await create_live_listing(client, seller))["id"] for _ in range(3)]
 
     # The first two sends fail. Each failure rolls back the batch, so nothing is marked sent.
     producer = FlakyProducer(outage_sends=2)
@@ -83,7 +47,7 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
         # Wait for the commit, not just the sends. A send can land just before its batch
         # commits, and cancelling then would roll the batch back.
         for _ in range(750):  # up to fifteen seconds; the test is about order, not speed
-            if await published_count(lid) == 4:
+            if await total_published_count() == 3:
                 break
             await asyncio.sleep(0.02)
     finally:
@@ -91,83 +55,30 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
         with suppress(asyncio.CancelledError):
             await task
 
-    # Failed sends are never recorded, so the successful run is the whole batch, in order.
-    delivered = snapshot_versions(producer.sent)
-    assert delivered == [1, 2, 3], f"delivered so far: {delivered}"
-    assert await published_count(lid) == 4  # the publish, then three updates
-
-
-async def test_a_redis_outage_delays_an_event_but_never_loses_it(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller)
-    lid = listing["id"]
-    await feed_auction_update(lid, price="120.00")
-
-    bus = LoopbackBus()
-    await relay_once(bus)  # the event is now in the bus, marked sent in the outbox
-
-    pubsub = await subscribe(listing_channel(lid))
-    real_publish = redis_client.publish
-    outages_left = 2
-
-    async def flaky_publish(channel: str, message: str) -> int:
-        nonlocal outages_left
-        if outages_left > 0:
-            outages_left -= 1
-            raise ConnectionError("redis down")
-        return await real_publish(channel, message)
-
-    monkeypatch.setattr(redis_client, "publish", flaky_publish)
-    try:
-        for value in bus.values:
-            await _forward_until_redis_accepts(Forwarder(), value)  # retries through the outage
-        event = await next_event(pubsub)
-    finally:
-        await pubsub.aclose()
-
-    assert outages_left == 0
-    assert event is not None
-    assert event["version"] == 1
+    # Failed sends are never recorded, so the successful run is the whole batch, once each.
+    delivered = sorted(key for _, key, _ in producer.sent)
+    assert delivered == sorted(ids), f"delivered so far: {delivered}"
+    assert await total_published_count() == 3
 
 
 async def test_purge_deletes_old_sent_rows_and_nothing_else(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
-    await feed_auction_update(lid, price="120.00")
-    await feed_auction_update(lid, price="150.00")
-    await relay_once(FakeProducer())  # sends the publish (version 0) and versions 1 and 2
-    await feed_auction_update(lid, price="160.00")  # version 3 stays unsent
+    old = (await create_live_listing(client, seller))["id"]
+    recent = (await create_live_listing(client, seller))["id"]
+    await relay_once(FakeProducer())  # sends both, so both rows are marked sent
+    unsent = (await create_live_listing(client, seller))["id"]  # stays unsent
 
-    # Version 1 was sent two days ago. Version 2 was sent just now.
+    # The first row was sent two days ago. The second was sent just now.
     async with SessionLocal() as session, session.begin():
         await session.execute(
             update(OutboxEvent)
-            .where(
-                OutboxEvent.partition_key == lid,
-                OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC,
-                OutboxEvent.payload["version"].as_integer() == 1,
-            )
+            .where(OutboxEvent.partition_key == old)
             .values(published_at=func.clock_timestamp() - timedelta(days=2))
         )
 
     assert await purge_sent_events(older_than=timedelta(days=1)) == 1
 
     async with SessionLocal() as session:
-        remaining = list(
-            await session.scalars(select(OutboxEvent).where(OutboxEvent.partition_key == lid))
-        )
-    assert sorted(row.payload["version"] for row in remaining) == [0, 2, 3]
-
-
-async def test_a_forgotten_listing_is_forwarded_again_rather_than_lost() -> None:
-    a, b, c = (str(uuid.uuid4()) for _ in range(3))
-    forwarder = Forwarder(max_listings=2)
-
-    assert await forwarder.handle(fake_event(a, 5)) is True
-    assert await forwarder.handle(fake_event(b, 1)) is True
-    assert await forwarder.handle(fake_event(c, 1)) is True  # the map is full: a is forgotten
-    assert await forwarder.handle(fake_event(a, 4)) is True  # forwarded again, not dropped
-    assert await forwarder.handle(fake_event(c, 1)) is False  # c is still remembered
+        remaining = set(await session.scalars(select(OutboxEvent.partition_key)))
+    assert remaining == {recent, unsent}
+    assert await published_count(recent) == 1

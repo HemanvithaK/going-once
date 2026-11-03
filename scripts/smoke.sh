@@ -68,6 +68,13 @@ echo "2. the api no longer takes bids"
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/listings/$lid/bids" \
   -H "authorization: Bearer $alice" -H 'content-type: application/json' -d '{"max_amount":"120.00"}')"
 [ "$code" = "404" ] && pass "api answers 404 for a bid" || fail "api answered $code for a bid, expected 404"
+# The old viewer socket lived on the api. A handshake to an unknown WebSocket route is refused with 403.
+code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  "$API/ws/listings/$lid")"
+[ "$code" = "403" ] && pass "api has no viewer WebSocket any more" \
+  || fail "api answered $code to a WebSocket handshake, expected 403"
 
 echo "3. bids go to bidding"
 # The listing reaches bidding through listing-events: relay, then bidding-sync.

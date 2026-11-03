@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
 from app.models.listing import Listing
+from app.models.outbox import OutboxEvent
 from app.services.auction_feed import FeedResult, apply_auction_update
 from tests.helpers import create_live_listing, feed_auction_update, make_user
 
@@ -70,3 +71,18 @@ async def test_an_event_this_service_does_not_use_is_ignored() -> None:
     ).encode()
     async with SessionLocal() as session, session.begin():
         assert await apply_auction_update(session, raw) is FeedResult.IGNORED
+
+
+async def test_an_update_queues_nothing_for_viewers(client: httpx.AsyncClient) -> None:
+    seller = await make_user(client, "seller@example.com")
+    listing = await create_live_listing(client, seller)
+
+    async def outbox_count() -> int:
+        async with SessionLocal() as session:
+            return int(await session.scalar(select(func.count()).select_from(OutboxEvent)) or 0)
+
+    before = await outbox_count()  # the publish
+    assert await feed_auction_update(listing["id"], price="125.00") is FeedResult.APPLIED
+
+    # Viewers hear about price changes from bidding, so the API announces nothing.
+    assert await outbox_count() == before
