@@ -11,7 +11,7 @@ from app.core.db import SessionLocal, engine
 from app.core.events import LISTING_EVENTS_TOPIC, LISTING_SNAPSHOTS_TOPIC
 from app.models.outbox import OutboxEvent
 from app.workers.relay import RELAY_LOCK_KEY, relay_once, run_relay
-from tests.helpers import create_live_listing, make_user, place_bid
+from tests.helpers import create_live_listing, feed_auction_update, make_user
 
 
 def snapshot_versions(sent: list[tuple[str, str, dict[str, Any]]]) -> list[int]:
@@ -51,15 +51,13 @@ async def test_relay_sends_each_listing_in_version_order_and_marks_rows_sent(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "relay-alice")
-    await place_bid(client, lid, bob, "150.00", "relay-bob")
+    await feed_auction_update(lid, price="120.00")
+    await feed_auction_update(lid, price="150.00")
 
     producer = FakeProducer()
-    # The publish (version 0) goes to listing-events. The two bids go to the snapshot topic.
+    # The publish (version 0) goes to listing-events. The two updates go to the snapshot topic.
     assert await relay_once(producer) == 3
 
     assert [(topic, key, payload["version"]) for topic, key, payload in producer.sent] == [
@@ -73,13 +71,11 @@ async def test_relay_sends_each_listing_in_version_order_and_marks_rows_sent(
 
 async def test_a_failed_batch_is_sent_again_in_full(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "fail-alice")
-    await place_bid(client, lid, bob, "150.00", "fail-bob")
-    await place_bid(client, lid, alice, "160.00", "fail-alice-2")
+    await feed_auction_update(lid, price="120.00")
+    await feed_auction_update(lid, price="150.00")
+    await feed_auction_update(lid, price="160.00")
 
     # The third send fails. The first two were accepted, but the batch rolls back.
     failing = FakeProducer(fail_on_send=2)
@@ -99,9 +95,8 @@ async def test_a_second_relay_does_nothing_while_the_first_holds_the_lock(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    await place_bid(client, listing["id"], alice, "120.00", "lock-alice")
+    await feed_auction_update(listing["id"], price="120.00")
 
     async with engine.connect() as holder:
         assert (
@@ -119,14 +114,13 @@ async def test_a_second_relay_does_nothing_while_the_first_holds_the_lock(
 
 async def test_a_running_relay_sends_new_events_as_they_arrive(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
 
     producer = FakeProducer()
     task = asyncio.create_task(run_relay(producer, poll_seconds=0.05))
     try:
-        await place_bid(client, lid, alice, "120.00", "live-relay-alice")
+        await feed_auction_update(lid, price="120.00")
         for _ in range(100):  # up to about two seconds
             if snapshot_versions(producer.sent):
                 break

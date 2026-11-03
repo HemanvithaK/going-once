@@ -1,7 +1,15 @@
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from sqlalchemy import select
+
+from app.core.db import SessionLocal
+from app.models.user import User
+from app.services.auction_feed import FeedResult, apply_auction_update
+from app.services.settlement import OutcomeResult, record_outcome
 
 PASSWORD = "a-long-enough-password"
 
@@ -14,6 +22,13 @@ async def make_user(client: httpx.AsyncClient, email: str) -> dict[str, str]:
     )
     response = await client.post("/auth/login", json={"email": email, "password": PASSWORD})
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+async def user_id(email: str) -> uuid.UUID:
+    async with SessionLocal() as session:
+        found = await session.scalar(select(User.id).where(User.email == email))
+    assert found is not None
+    return found
 
 
 def listing_body(**overrides: Any) -> dict[str, Any]:
@@ -49,15 +64,41 @@ async def create_live_listing(
     return published
 
 
-async def place_bid(
-    client: httpx.AsyncClient,
+async def feed_auction_update(listing_id: str, *, price: str, status: str = "live") -> FeedResult:
+    """Stand in for bidding: apply an auction.updated event the way the feed consumer does."""
+    raw = json.dumps(
+        {
+            "type": "auction.updated",
+            "schema_version": 1,
+            "listing_id": listing_id,
+            "version": 1,
+            "status": status,
+            "current_price": price,
+            "ends_at": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+        }
+    ).encode()
+    async with SessionLocal() as session, session.begin():
+        return await apply_auction_update(session, raw)
+
+
+async def settle(
     listing_id: str,
-    headers: dict[str, str],
-    amount: str,
-    key: str,
-) -> httpx.Response:
-    return await client.post(
-        f"/listings/{listing_id}/bids",
-        json={"max_amount": amount},
-        headers={**headers, "Idempotency-Key": key},
-    )
+    *,
+    status: str,
+    winner: uuid.UUID | None = None,
+    price: str | None = None,
+) -> OutcomeResult:
+    """Stand in for bidding: apply an auction.settled event the way the outcome consumer does."""
+    raw = json.dumps(
+        {
+            "type": "auction.settled",
+            "schema_version": 1,
+            "listing_id": listing_id,
+            "version": 3,
+            "status": status,
+            "winner_id": None if winner is None else str(winner),
+            "final_price": price,
+        }
+    ).encode()
+    async with SessionLocal() as session, session.begin():
+        return await record_outcome(session, raw)

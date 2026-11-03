@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException, status
 from sqlalchemy import text
 
 from app.api.auth import router as auth_router
-from app.api.bids import router as bids_router
 from app.api.listings import router as listings_router
 from app.api.realtime import router as realtime_router
 from app.core.db import engine
@@ -32,7 +31,6 @@ app = FastAPI(title="going-once-api", version="0.1.0", lifespan=lifespan)
 
 app.include_router(auth_router)
 app.include_router(listings_router)
-app.include_router(bids_router)
 app.include_router(realtime_router)
 
 

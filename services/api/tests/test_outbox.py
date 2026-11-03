@@ -1,23 +1,21 @@
 import uuid
-from datetime import timedelta
-from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
 from app.core.events import LISTING_SNAPSHOTS_TOPIC
 from app.models.listing import Listing, ListingStatus
 from app.models.outbox import OutboxEvent
-from app.services import closing
-from app.services.closing import close_all_due
-from tests.helpers import create_live_listing, make_user, place_bid
+from app.services import settlement
+from app.services.auction_feed import FeedResult
+from app.services.settlement import OutcomeResult
+from tests.helpers import create_live_listing, feed_auction_update, make_user, settle, user_id
 
 
 async def outbox_rows(listing_id: str) -> list[OutboxEvent]:
-    """This listing's outbox rows, in version order."""
+    """This listing's snapshot rows, in version order."""
     async with SessionLocal() as session:
         result = await session.scalars(
             select(OutboxEvent)
@@ -39,66 +37,57 @@ async def stored_version(listing_id: str) -> int:
     return int(version)
 
 
-async def set_deadline_past(listing_id: str) -> None:
-    async with SessionLocal() as session, session.begin():
-        await session.execute(
-            update(Listing)
-            .where(Listing.id == uuid.UUID(listing_id))
-            .values(ends_at=func.clock_timestamp() - timedelta(seconds=1))
-        )
-
-
-async def test_an_accepted_bid_writes_one_outbox_row_with_the_new_state(
+async def test_a_feed_update_writes_one_outbox_row_with_the_new_state(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
 
-    response = await place_bid(client, lid, alice, "120.00", "outbox-alice")
-    assert response.status_code == 201, response.text
+    assert await feed_auction_update(lid, price="120.00") is FeedResult.APPLIED
 
     rows = await outbox_rows(lid)
     assert len(rows) == 1
     row = rows[0]
     assert row.topic == LISTING_SNAPSHOTS_TOPIC
     assert row.partition_key == lid
-    assert row.published_at is None  # not sent yet: that is the relay's job (Part C)
+    assert row.published_at is None  # not sent yet: that is the relay's job
     assert row.payload["version"] == 1
     assert row.payload["status"] == "live"
-    assert row.payload["current_price"] == "100.00"
+    assert row.payload["current_price"] == "120.00"
 
 
-async def test_a_rejected_bid_writes_no_outbox_row(client: httpx.AsyncClient) -> None:
-    seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
-    lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "outbox-reject-alice")
+async def test_an_update_for_an_unknown_listing_writes_no_outbox_row() -> None:
+    assert (
+        await feed_auction_update(str(uuid.uuid4()), price="120.00")
+    ) is FeedResult.UNKNOWN_LISTING
 
-    # The minimum is 105, so 102 is refused and the transaction rolls back.
-    response = await place_bid(client, lid, bob, "102.00", "outbox-reject-bob")
-    assert response.status_code == 409
-
-    rows = await outbox_rows(lid)
-    assert [row.payload["version"] for row in rows] == [1]  # only Alice's accepted bid
+    async with SessionLocal() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC)
+        )
+    assert count == 0
 
 
 async def test_each_change_bumps_the_version_and_the_rows_follow_in_order(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
+    await make_user(client, "buyer@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
 
-    await place_bid(client, lid, alice, "120.00", "versions-alice")
-    await place_bid(client, lid, bob, "150.00", "versions-bob")
-    await set_deadline_past(lid)
-    assert await close_all_due() == 1
+    await feed_auction_update(lid, price="120.00")
+    await feed_auction_update(lid, price="150.00")
+    outcome = await settle(
+        lid,
+        status="sold",
+        winner=await user_id("buyer@example.com"),
+        price="150.00",
+    )
+    assert outcome is OutcomeResult.RECORDED
 
     rows = await outbox_rows(lid)
     assert [row.payload["version"] for row in rows] == [1, 2, 3]
@@ -106,41 +95,35 @@ async def test_each_change_bumps_the_version_and_the_rows_follow_in_order(
     assert await stored_version(lid) == 3
 
 
-async def test_a_closer_that_crashes_after_queueing_leaves_no_outbox_row(
+async def test_a_failed_outcome_leaves_no_outbox_row_and_a_retry_writes_it_once(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
+    await make_user(client, "buyer@example.com")
     listing = await create_live_listing(client, seller)
     lid = listing["id"]
-    await place_bid(client, lid, alice, "150.00", "crash-outbox-alice")
-    await set_deadline_past(lid)
-    assert len(await outbox_rows(lid)) == 1  # Alice's bid only
+    buyer = await user_id("buyer@example.com")
+    await feed_auction_update(lid, price="150.00")
+    assert len(await outbox_rows(lid)) == 1  # the feed update only
 
-    original_record_sale = closing._record_sale
+    real_queue_event = settlement.queue_event
 
-    async def die_after_queueing(
-        session: AsyncSession,
-        listing: Listing,
-        buyer_id: uuid.UUID,
-        amount: Decimal,
-    ) -> None:
-        await original_record_sale(session, listing, buyer_id, amount)
-        raise RuntimeError("killed after the sale was queued, before commit")
+    def die_after_queueing(session, listing_row) -> None:  # type: ignore[no-untyped-def]
+        real_queue_event(session, listing_row)
+        raise RuntimeError("killed after queueing, before commit")
 
-    monkeypatch.setattr(closing, "_record_sale", die_after_queueing)
+    monkeypatch.setattr(settlement, "queue_event", die_after_queueing)
     with pytest.raises(RuntimeError):
-        await close_all_due()
+        await settle(lid, status="sold", winner=buyer, price="150.00")
 
-    # The rollback removed the sale's outbox row along with the sale itself.
+    # The rollback removed the sale, its order, and its outbox row together.
     assert len(await outbox_rows(lid)) == 1
     async with SessionLocal() as session:
         status = await session.scalar(select(Listing.status).where(Listing.id == uuid.UUID(lid)))
     assert status is ListingStatus.LIVE
 
-    # A restarted closer writes the sale exactly once.
-    monkeypatch.setattr(closing, "_record_sale", original_record_sale)
-    assert await close_all_due() == 1
+    monkeypatch.setattr(settlement, "queue_event", real_queue_event)
+    assert await settle(lid, status="sold", winner=buyer, price="150.00") is OutcomeResult.RECORDED
     rows = await outbox_rows(lid)
     assert [row.payload["status"] for row in rows] == ["live", "sold"]

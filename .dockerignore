@@ -1,0 +1,12 @@
+# Both service images build from the repository root, so keep local state out of the context.
+.git
+.env
+**/.env
+.venv
+**/.venv
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/node_modules

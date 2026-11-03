@@ -3,21 +3,18 @@ import json
 import os
 import uuid
 from contextlib import suppress
-from datetime import timedelta
 
 import httpx
 import pytest
 from redis.asyncio.client import PubSub
-from sqlalchemy import func, update
 
-from app.core.db import SessionLocal
 from app.core.events import listing_channel
 from app.core.redis import redis_client
-from app.models.listing import Listing
-from app.services.closing import close_all_due
+from app.services.auction_feed import FeedResult
+from app.services.settlement import OutcomeResult
 from app.workers.consumer import Forwarder, run_consumer
 from app.workers.relay import make_producer, relay_once
-from tests.helpers import create_live_listing, make_user, place_bid
+from tests.helpers import create_live_listing, feed_auction_update, make_user, settle, user_id
 from tests.pipeline import deliver_outbox
 
 requires_broker = pytest.mark.skipif(
@@ -48,25 +45,14 @@ def fake_event(listing_id: str, version: int) -> bytes:
     ).encode()
 
 
-async def set_deadline_past(listing_id: str) -> None:
-    async with SessionLocal() as session, session.begin():
-        await session.execute(
-            update(Listing)
-            .where(Listing.id == uuid.UUID(listing_id))
-            .values(ends_at=func.clock_timestamp() - timedelta(seconds=1))
-        )
-
-
-async def test_an_accepted_bid_reaches_its_listing_channel(client: httpx.AsyncClient) -> None:
+async def test_a_feed_update_reaches_its_listing_channel(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00")
     lid = listing["id"]
 
     pubsub = await subscribe(listing_channel(lid))
     try:
-        response = await place_bid(client, lid, alice, "150.00", "event-key-001")
-        assert response.status_code == 201, response.text
+        assert await feed_auction_update(lid, price="120.00") is FeedResult.APPLIED
 
         await deliver_outbox()  # outbox -> relay -> forwarder -> Redis
 
@@ -74,26 +60,23 @@ async def test_an_accepted_bid_reaches_its_listing_channel(client: httpx.AsyncCl
         assert event is not None
         assert event["type"] == "listing.updated"
         assert event["version"] == 1
-        assert event["current_price"] == "100.00"
+        assert event["current_price"] == "120.00"
         assert event["status"] == "live"
     finally:
         await pubsub.aclose()
 
 
-async def test_a_rejected_bid_publishes_nothing(client: httpx.AsyncClient) -> None:
+async def test_an_update_for_an_unknown_listing_publishes_nothing(
+    client: httpx.AsyncClient,
+) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
-    listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
+    listing = await create_live_listing(client, seller, start_price="100.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "event-key-002")
-    await deliver_outbox()  # Alice's bid goes out before we start listening
+    await deliver_outbox()  # the publish goes out before we start listening
 
     pubsub = await subscribe(listing_channel(lid))
     try:
-        # Below the minimum of 105, so the API answers 409 and the transaction rolls back.
-        response = await place_bid(client, lid, bob, "102.00", "event-key-003")
-        assert response.status_code == 409
+        await feed_auction_update(str(uuid.uuid4()), price="102.00")
         await deliver_outbox()
 
         assert await next_event(pubsub, wait_seconds=0.5) is None
@@ -101,18 +84,23 @@ async def test_a_rejected_bid_publishes_nothing(client: httpx.AsyncClient) -> No
         await pubsub.aclose()
 
 
-async def test_a_closed_auction_publishes_its_final_status(client: httpx.AsyncClient) -> None:
+async def test_a_settled_auction_publishes_its_final_status(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
+    await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller)
     lid = listing["id"]
-    await place_bid(client, lid, alice, "150.00", "event-key-004")
-    await set_deadline_past(lid)
-    await deliver_outbox()  # the bid goes out before we start listening
+    await feed_auction_update(lid, price="150.00")
+    await deliver_outbox()  # the update goes out before we start listening
 
     pubsub = await subscribe(listing_channel(lid))
     try:
-        assert await close_all_due() == 1
+        outcome = await settle(
+            lid,
+            status="sold",
+            winner=await user_id("alice@example.com"),
+            price="150.00",
+        )
+        assert outcome is OutcomeResult.RECORDED
         await deliver_outbox()
 
         event = await next_event(pubsub)
@@ -151,10 +139,9 @@ async def test_a_malformed_event_is_skipped_not_retried() -> None:
 @requires_broker
 async def test_an_event_crosses_a_real_kafka_broker_to_redis(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "broker-alice")
+    await feed_auction_update(lid, price="120.00")
 
     pubsub = await subscribe(listing_channel(lid))
     # A new group name each run. The group starts at the oldest event on the topic,
@@ -163,7 +150,8 @@ async def test_an_event_crosses_a_real_kafka_broker_to_redis(client: httpx.Async
     producer = make_producer()
     await producer.start()
     try:
-        assert await relay_once(producer) == 1  # a real send to the real topic
+        # The publish and the update are both unsent, so two rows go to Kafka.
+        assert await relay_once(producer) == 2
         event = await next_event(pubsub, wait_seconds=20)
     finally:
         await producer.stop()

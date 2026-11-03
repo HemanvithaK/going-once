@@ -1,3 +1,18 @@
+# Both images build from the repository root: each needs the contracts package.
+x-api-build: &api-build
+  context: .
+  dockerfile: services/api/Dockerfile
+
+x-bidding-build: &bidding-build
+  context: .
+  dockerfile: services/bidding/Dockerfile
+
+# Bidding has its own database. .env supplies JWT_SECRET (shared with the API), and this
+# overrides the DATABASE_URL that .env points at the API's database.
+x-bidding-env: &bidding-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  DATABASE_URL: postgresql+asyncpg://auction:auction@db:5432/bidding
+
 services:
   db:
     image: postgres:16-alpine
@@ -12,6 +27,22 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  # Postgres only runs init scripts on an empty volume, so a one-shot service creates
+  # the bidding database. Safe to run again: it does nothing if the database exists.
+  db-init:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: auction
+    command:
+      - sh
+      - -c
+      - |
+        psql -h db -U auction -d auction -tAc "SELECT 1 FROM pg_database WHERE datname='bidding'" | grep -q 1 \
+          || psql -h db -U auction -d auction -c "CREATE DATABASE bidding"
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
 
   redis:
     image: redis:7-alpine
@@ -43,17 +74,26 @@ services:
       retries: 20
       start_period: 10s
 
+  # Creates every topic up front, so a consumer never starts before its topic exists.
+  # Three partitions each; events for one listing share a key, so they stay in order.
   kafka-init:
     image: apache/kafka:3.8.0
     depends_on:
       kafka: {condition: service_healthy}
-    command: >
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
-      --create --if-not-exists --topic listing-events --partitions 3 --replication-factor 1
+    command:
+      - sh
+      - -c
+      - |
+        for topic in listing-events listing-snapshots auction-updates auction-outcomes; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1 || exit 1
+        done
     restart: "no"
 
+  # ---- core api: users, listings, orders ----
+
   api:
-    build: ./services/api
+    build: *api-build
     user: "1000:1000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file: .env
@@ -66,8 +106,9 @@ services:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
 
+  # Sends the api's outbox (listing-events, listing-snapshots) to Kafka.
   relay:
-    build: ./services/api
+    build: *api-build
     user: "1000:1000"
     command: python -m app.workers.relay
     env_file: .env
@@ -79,20 +120,101 @@ services:
       db: {condition: service_healthy}
       kafka-init: {condition: service_completed_successfully}
 
+  # listing-snapshots -> Redis, for WebSocket viewers.
   consumer:
-    build: ./services/api
+    build: *api-build
     command: python -m app.workers.consumer
     env_file: .env
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     restart: unless-stopped
     depends_on:
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
+      kafka: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  # auction-updates -> the api's listing copy (current price, deadline).
+  auction-feed:
+    build: *api-build
+    command: python -m app.workers.auction_feed
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+
+  # auction-outcomes -> sold or unsold on the listing, plus the order.
+  outcomes:
+    build: *api-build
+    command: python -m app.workers.outcomes
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+
+  # ---- bidding: auction state, bids, closing ----
+
+  # Applies bidding's migrations, then exits. alembic.ini lives in the service folder,
+  # which is not part of the installed package, so run from there.
+  bidding-migrate:
+    build: *bidding-build
+    working_dir: /code/services/bidding
+    command: python -m alembic upgrade head
+    env_file: .env
+    environment: *bidding-env
+    restart: "no"
+    depends_on:
+      db-init: {condition: service_completed_successfully}
+
+  # The only place bids are accepted. Clients send the api's access token here.
+  bidding:
+    build: *bidding-build
+    env_file: .env
+    environment: *bidding-env
+    ports: ["8001:8000"]
+    restart: unless-stopped
+    depends_on:
+      bidding-migrate: {condition: service_completed_successfully}
+
+  # Sends bidding's outbox (auction-updates, auction-outcomes) to Kafka.
+  bidding-relay:
+    build: *bidding-build
+    command: python -m app.workers.relay
+    env_file: .env
+    environment: *bidding-env
+    restart: unless-stopped
+    depends_on:
+      bidding-migrate: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+
+  # Settles auctions whose deadline has passed.
+  bidding-closer:
+    build: *bidding-build
+    command: python -m app.workers.closer
+    env_file: .env
+    environment: *bidding-env
+    restart: unless-stopped
+    depends_on:
+      bidding-migrate: {condition: service_completed_successfully}
+
+  # listing-events -> bidding's auctions table: how a published listing becomes biddable.
+  bidding-sync:
+    build: *bidding-build
+    command: python -m app.workers.auction_sync
+    env_file: .env
+    environment: *bidding-env
+    restart: unless-stopped
+    depends_on:
+      bidding-migrate: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
 
 volumes:
   pgdata:

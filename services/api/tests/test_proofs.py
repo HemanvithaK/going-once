@@ -20,7 +20,7 @@ from app.core.redis import redis_client
 from app.models.outbox import OutboxEvent
 from app.workers.consumer import Forwarder, _forward_until_redis_accepts
 from app.workers.relay import purge_sent_events, relay_once, run_relay
-from tests.helpers import create_live_listing, make_user, place_bid
+from tests.helpers import create_live_listing, feed_auction_update, make_user
 from tests.pipeline import LoopbackBus
 from tests.test_consumer import fake_event, next_event, subscribe
 from tests.test_relay import FakeProducer, published_count, snapshot_versions
@@ -45,19 +45,17 @@ async def test_two_listings_interleaved_still_go_out_in_order_for_each(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
     first = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     second = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
 
-    # Bids alternate between the two listings, so their versions interleave in the outbox.
-    await place_bid(client, first["id"], alice, "120.00", "order-a1")
-    await place_bid(client, second["id"], alice, "120.00", "order-b1")
-    await place_bid(client, first["id"], bob, "150.00", "order-a2")
-    await place_bid(client, second["id"], bob, "150.00", "order-b2")
+    # Updates alternate between the two listings, so their versions interleave in the outbox.
+    await feed_auction_update(first["id"], price="120.00")
+    await feed_auction_update(second["id"], price="120.00")
+    await feed_auction_update(first["id"], price="150.00")
+    await feed_auction_update(second["id"], price="150.00")
 
     producer = FakeProducer()
-    assert await relay_once(producer) == 6  # two publishes, four bids
+    assert await relay_once(producer) == 6  # two publishes, four updates
 
     for listing in (first, second):
         versions = [
@@ -72,13 +70,11 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
     client: httpx.AsyncClient,
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "outage-alice")
-    await place_bid(client, lid, bob, "150.00", "outage-bob")
-    await place_bid(client, lid, alice, "160.00", "outage-alice-2")
+    await feed_auction_update(lid, price="120.00")
+    await feed_auction_update(lid, price="150.00")
+    await feed_auction_update(lid, price="160.00")
 
     # The first two sends fail. Each failure rolls back the batch, so nothing is marked sent.
     producer = FlakyProducer(outage_sends=2)
@@ -98,17 +94,16 @@ async def test_events_made_during_a_kafka_outage_go_out_once_it_recovers(
     # Failed sends are never recorded, so the successful run is the whole batch, in order.
     delivered = snapshot_versions(producer.sent)
     assert delivered == [1, 2, 3], f"delivered so far: {delivered}"
-    assert await published_count(lid) == 4  # the publish, then three bids
+    assert await published_count(lid) == 4  # the publish, then three updates
 
 
 async def test_a_redis_outage_delays_an_event_but_never_loses_it(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
     listing = await create_live_listing(client, seller)
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "redis-alice")
+    await feed_auction_update(lid, price="120.00")
 
     bus = LoopbackBus()
     await relay_once(bus)  # the event is now in the bus, marked sent in the outbox
@@ -139,20 +134,22 @@ async def test_a_redis_outage_delays_an_event_but_never_loses_it(
 
 async def test_purge_deletes_old_sent_rows_and_nothing_else(client: httpx.AsyncClient) -> None:
     seller = await make_user(client, "seller@example.com")
-    alice = await make_user(client, "alice@example.com")
-    bob = await make_user(client, "bob@example.com")
     listing = await create_live_listing(client, seller, start_price="100.00", bid_increment="5.00")
     lid = listing["id"]
-    await place_bid(client, lid, alice, "120.00", "purge-alice")
-    await place_bid(client, lid, bob, "150.00", "purge-bob")
+    await feed_auction_update(lid, price="120.00")
+    await feed_auction_update(lid, price="150.00")
     await relay_once(FakeProducer())  # sends the publish (version 0) and versions 1 and 2
-    await place_bid(client, lid, alice, "160.00", "purge-alice-2")  # version 3 stays unsent
+    await feed_auction_update(lid, price="160.00")  # version 3 stays unsent
 
     # Version 1 was sent two days ago. Version 2 was sent just now.
     async with SessionLocal() as session, session.begin():
         await session.execute(
             update(OutboxEvent)
-            .where(OutboxEvent.payload["version"].as_integer() == 1)
+            .where(
+                OutboxEvent.partition_key == lid,
+                OutboxEvent.topic == LISTING_SNAPSHOTS_TOPIC,
+                OutboxEvent.payload["version"].as_integer() == 1,
+            )
             .values(published_at=func.clock_timestamp() - timedelta(days=2))
         )
 
