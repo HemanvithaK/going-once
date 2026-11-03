@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # End-to-end check of the split: a listing is published on the api, bids go to bidding,
-# the price shows up on the api, and when the auction ends the api records the sale.
+# the price shows up on the api, a viewer on the realtime service watches it happen, and
+# when the auction ends the api records the sale.
 #
 # Run with the whole stack up:   docker compose up -d --build && ./scripts/smoke.sh
+# Run it with your virtualenv active: the viewer check needs the websockets package.
 # Takes about a minute, because it waits for a real deadline.
 set -uo pipefail
 
 API="${API:-http://localhost:8000}"
 BIDDING="${BIDDING:-http://localhost:8001}"
+REALTIME="${REALTIME:-ws://localhost:8002}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN="$(date +%s)"
 PASSWORD="a-long-enough-password"
 failures=0
@@ -50,6 +54,16 @@ lid="$(echo "$listing" | field id)"
 curl -s -X POST "$API/listings/$lid/publish" -H "authorization: Bearer $seller" >/dev/null
 pass "listing $lid published, ends at $ends"
 
+# A viewer on the realtime service, started before any bid. It keeps retrying until
+# bidding knows the listing, then records everything it is sent.
+watcher_pid=""
+watcher_log="$(mktemp)"
+if python3 -c 'import websockets' 2>/dev/null; then
+  python3 "$HERE/watch.py" "$lid" --url "$REALTIME" \
+    --expect-price 125 --expect-status sold --timeout 170 >"$watcher_log" 2>&1 &
+  watcher_pid=$!
+fi
+
 echo "2. the api no longer takes bids"
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/listings/$lid/bids" \
   -H "authorization: Bearer $alice" -H 'content-type: application/json' -d '{"max_amount":"120.00"}')"
@@ -88,6 +102,19 @@ done
 [ "$status" = "sold" ] && pass "api shows the listing as sold" || fail "api status is '$status', expected sold"
 orders="$(docker compose exec -T db psql -U auction -d auction -tAc "SELECT count(*) FROM orders WHERE listing_id = '$lid'" 2>/dev/null | tr -d '[:space:]')"
 [ "$orders" = "1" ] && pass "exactly one order was written" || fail "orders for this listing: '${orders:-unknown}', expected 1"
+
+echo "6. a viewer on the realtime service saw it happen"
+if [ -n "$watcher_pid" ]; then
+  if wait "$watcher_pid"; then
+    pass "viewer saw price 125, then sold, and versions only went up"
+  else
+    fail "the viewer did not see what it should have:"
+    sed 's/^/          /' "$watcher_log"
+  fi
+else
+  echo "  SKIP  the websockets package is missing: activate your virtualenv and run again"
+fi
+rm -f "$watcher_log"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "ALL CHECKS PASSED"; else echo "$failures CHECK(S) FAILED"; exit 1; fi

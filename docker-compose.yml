@@ -7,6 +7,10 @@ x-bidding-build: &bidding-build
   context: .
   dockerfile: services/bidding/Dockerfile
 
+x-realtime-build: &realtime-build
+  context: .
+  dockerfile: services/realtime/Dockerfile
+
 # Bidding has its own database. .env supplies JWT_SECRET (shared with the API), and this
 # overrides the DATABASE_URL that .env points at the API's database.
 x-bidding-env: &bidding-env
@@ -215,6 +219,37 @@ services:
       bidding-migrate: {condition: service_completed_successfully}
       kafka: {condition: service_healthy}
       kafka-init: {condition: service_completed_successfully}
+
+  # ---- realtime: pushes public auction updates to viewers. No database. ----
+  # These two services get no .env: they have no database and verify no tokens, so they
+  # are not handed a database URL or the signing key.
+
+  # The WebSocket server. A viewer's first snapshot comes from bidding.
+  realtime:
+    build: *realtime-build
+    environment:
+      ENVIRONMENT: local
+      REDIS_URL: redis://redis:6379/0
+      BIDDING_URL: http://bidding:8000
+    ports: ["8002:8000"]
+    restart: unless-stopped
+    depends_on:
+      redis: {condition: service_healthy}
+
+  # auction-updates -> Redis, where every realtime server process picks it up.
+  realtime-consumer:
+    build: *realtime-build
+    command: python -m app.workers.forwarder
+    environment:
+      ENVIRONMENT: local
+      REDIS_URL: redis://redis:6379/0
+      BIDDING_URL: http://bidding:8000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
 
 volumes:
   pgdata:
