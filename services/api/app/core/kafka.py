@@ -1,8 +1,8 @@
 """Kafka connection helpers.
 
-Nothing in the request path calls Kafka. Bids and closes write their events to
-the database (Part B), and the relay sends them to Kafka when it can (Part C).
-So an API instance keeps taking bids while Kafka is down.
+Nothing in the request path calls Kafka. Publishing a listing writes its event to
+the database, and the relay sends it to Kafka when it can. So an API instance keeps
+publishing listings while Kafka is down.
 """
 
 import asyncio

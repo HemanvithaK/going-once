@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     database_url: str
-    redis_url: str
 
     # RFC 7518: an HMAC-SHA256 key should be at least 32 bytes.
     # Generate one with: openssl rand -hex 32
@@ -26,13 +25,8 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
-    # Anti-snipe: a bid this close to the deadline pushes the deadline out.
-    anti_snipe_seconds: int = 30
-    # How long the closer sleeps when there is nothing due to close.
-    closer_poll_seconds: float = 1.0
-
-    # Kafka broker list, "host:port" separated by commas. Used from Part B on,
-    # when the relay sends outbox events to Kafka.
+    # Kafka broker list, "host:port" separated by commas. The relay and the feed
+    # consumers use it.
     kafka_bootstrap_servers: str = "localhost:9092"
 
 

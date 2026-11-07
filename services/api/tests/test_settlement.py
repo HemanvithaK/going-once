@@ -106,4 +106,57 @@ async def test_an_unsold_outcome_marks_the_listing_unsold_with_no_order(
     assert await count_orders() == 0
 
 
-async def test_a_repeated_outcome_is_recorded_once(client:
+async def test_a_repeated_outcome_is_recorded_once(client: httpx.AsyncClient) -> None:
+    listing_id, _, buyer = await live_listing(client)
+    raw = settled(listing_id, status="sold", winner=buyer, price="125.00")
+
+    assert await apply(raw) is OutcomeResult.RECORDED
+    assert await apply(raw) is OutcomeResult.ALREADY_SETTLED
+    assert await count_orders() == 1
+
+
+async def test_an_outcome_for_an_unknown_listing_changes_nothing() -> None:
+    result = await apply(settled(uuid.uuid4(), status="unsold"))
+
+    assert result is OutcomeResult.UNKNOWN_LISTING
+    assert await count_orders() == 0
+
+
+async def test_a_malformed_outcome_is_skipped() -> None:
+    assert await apply(b"not json at all") is OutcomeResult.MALFORMED
+
+
+async def test_a_recorded_outcome_queues_nothing_for_viewers(
+    client: httpx.AsyncClient,
+) -> None:
+    listing_id, _, _ = await live_listing(client)
+    before = await count_outbox_rows()
+
+    assert await apply(settled(listing_id, status="unsold")) is OutcomeResult.RECORDED
+
+    # Bidding already told viewers. The core API does not announce the result again.
+    assert await count_outbox_rows() == before
+
+
+async def test_a_failed_sale_rolls_back_the_listing_and_the_order(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing_id, _, buyer = await live_listing(client)
+    raw = settled(listing_id, status="sold", winner=buyer, price="125.00")
+
+    class ExplodingOrder:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("killed while writing the order")
+
+    monkeypatch.setattr(settlement, "Order", ExplodingOrder)
+    with pytest.raises(RuntimeError):
+        await apply(raw)
+
+    # The listing is still live: the status change rolled back with the failed order.
+    assert (await read_listing(listing_id)).status is ListingStatus.LIVE
+    assert await count_orders() == 0
+
+    monkeypatch.undo()
+    assert await apply(raw) is OutcomeResult.RECORDED
+    assert (await read_listing(listing_id)).status is ListingStatus.SOLD
+    assert await count_orders() == 1

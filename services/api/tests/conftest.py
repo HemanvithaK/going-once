@@ -35,7 +35,7 @@ async def clean_tables() -> AsyncIterator[None]:
     """Start every test from an empty database."""
     async with SessionLocal() as session:
         await session.execute(
-            text("TRUNCATE users, refresh_tokens, listings, bids, orders, outbox_events CASCADE")
+            text("TRUNCATE users, refresh_tokens, listings, orders, outbox_events CASCADE")
         )
         await session.commit()
     yield

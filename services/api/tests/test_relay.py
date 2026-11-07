@@ -80,6 +80,16 @@ async def test_relay_sends_each_published_listing_and_marks_the_rows_sent(
     assert await relay_once(producer) == 0  # nothing left to send
 
 
+async def test_a_backlog_goes_out_oldest_first(client: httpx.AsyncClient) -> None:
+    ids = await publish_listings(client, 5)  # published one after another
+
+    producer = FakeProducer()
+    assert await relay_once(producer) == 5
+
+    # Outbox ids are random, so only the creation time can put these in publish order.
+    assert [key for _, key, _ in producer.sent] == ids
+
+
 async def test_a_failed_batch_is_sent_again_in_full(client: httpx.AsyncClient) -> None:
     ids = await publish_listings(client, 3)
 

@@ -53,16 +53,12 @@ class Listing(Base):
     reserve_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), default=None)
     bid_increment: Mapped[Decimal] = mapped_column(Numeric(12, 2), server_default=text("1.00"))
 
-    # Denormalised: the highest bid so far. Kept in step with `bids` inside
-    # the same transaction that inserts a bid.
+    # A copy of the price bidding computed. The auction-feed consumer keeps it current;
+    # this service never works out a price itself.
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
 
-    # Bumped by every change, inside the same transaction. Consumers use it to
-    # tell a newer event from an older one (Part D).
-    version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
-
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    # Mutable: an anti-snipe bid pushes this out.
+    # Mutable: bidding pushes it out on an anti-snipe bid, and the feed copies the change.
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     status: Mapped[ListingStatus] = mapped_column(

@@ -25,7 +25,7 @@ def listing_published(listing: "Listing") -> dict[str, Any]:
         "type": "listing.published",
         "schema_version": 1,
         "listing_id": str(listing.id),
-        "version": listing.version,
+        "version": 0,  # the publish is always version 0; bidding numbers every change after
         "seller_id": str(listing.seller_id),
         "start_price": str(listing.start_price),
         "bid_increment": str(listing.bid_increment),

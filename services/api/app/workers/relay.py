@@ -1,4 +1,4 @@
-"""Relay: sends outbox events to Kafka, in order, then marks them sent.
+"""Relay: sends outbox events to Kafka, oldest first, then marks them sent.
 
 Only one relay runs at a time. It takes a Postgres advisory lock, which is a
 named lock held by a database connection. A second relay, such as a second
@@ -7,8 +7,11 @@ its connection closes, the lock is released, and the next relay takes over.
 
 Delivery is at-least-once. If the relay crashes after Kafka accepts an event but
 before its batch commits, the event is sent again. Consumers must tolerate
-repeats. Each event carries the listing's version, so a consumer can ignore
-anything it has already applied.
+repeats. Bidding applies a listing.published event once, however many times it arrives.
+
+Ordering: the core API announces one event per listing, so no two events share a key and
+no per-key order is needed. If it ever announces a second event for the same listing, add
+a sequence column and sort by it. Sorting by created_at is not safe across transactions.
 """
 
 import argparse
@@ -86,10 +89,8 @@ async def relay_once(
             await session.scalars(
                 select(OutboxEvent)
                 .where(OutboxEvent.published_at.is_(None))
-                # Within one listing, versions must go out in order. Sorting by version
-                # does that. It is safe because version N+1 cannot be committed before
-                # version N, so the relay never sees N+1 without N.
-                .order_by(OutboxEvent.payload["version"].as_integer(), OutboxEvent.id)
+                # Oldest first, so a backlog drains in the order it built up.
+                .order_by(OutboxEvent.created_at, OutboxEvent.id)
                 .limit(batch_size)
                 .with_for_update()
             )
