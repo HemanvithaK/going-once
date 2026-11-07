@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router'
+import { Link, Navigate } from 'react-router'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/authContext'
 import { FormError } from '../components/FormError'
@@ -12,7 +12,6 @@ const MIN_NAME = 2
 
 export function RegisterPage() {
   const { state, register } = useAuth()
-  const navigate = useNavigate()
   const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -36,8 +35,7 @@ export function RegisterPage() {
     setError(null)
     setBusy(true)
     try {
-      await register({ email, password, display_name: displayName.trim() })
-      navigate('/')
+      await register({ email, password, display_name: displayName.trim() }) // then redirected
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'something went wrong')
     } finally {

@@ -1,1 +1,15 @@
 @import 'tailwindcss';
+
+/* A short yellow flash behind a price that has just changed. */
+@theme {
+  --animate-price-flash: price-flash 1.2s ease-out;
+
+  @keyframes price-flash {
+    from {
+      background-color: var(--color-amber-200);
+    }
+    to {
+      background-color: transparent;
+    }
+  }
+}

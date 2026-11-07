@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router'
+import { Link, Navigate, useLocation } from 'react-router'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/authContext'
 import { FormError } from '../components/FormError'
@@ -7,7 +7,9 @@ import { TextField } from '../components/TextField'
 
 export function LoginPage() {
   const { state, login } = useAuth()
-  const navigate = useNavigate()
+  // A page that sent the user here ("Log in to bid") passes where to come back to.
+  const location = useLocation()
+  const from = (location.state as { from?: string } | null)?.from ?? '/'
   // Each piece of form state is its own useState. Typing calls the setter, React re-draws.
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -15,7 +17,7 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false)
 
   if (state.status === 'signedIn') {
-    return <Navigate to="/" replace />
+    return <Navigate to={from} replace />
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -23,8 +25,7 @@ export function LoginPage() {
     setError(null)
     setBusy(true)
     try {
-      await login(email, password)
-      navigate('/')
+      await login(email, password) // signed in: the check above redirects on the next draw
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'something went wrong')
     } finally {

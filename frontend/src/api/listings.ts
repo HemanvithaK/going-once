@@ -36,4 +36,7 @@ export const listingsApi = {
     if (cursor !== null) query.set('cursor', cursor)
     return requestJson<ListingPage>(`${services.api}/listings?${query}`)
   },
+
+  /** One listing: title, description, prices. Its live price comes from realtime instead. */
+  get: (id: string) => requestJson<Listing>(`${services.api}/listings/${id}`),
 }
