@@ -195,4 +195,3 @@ async def test_logout_with_an_unknown_token_is_still_204(client: httpx.AsyncClie
     """Logout must not reveal whether a token existed."""
     response = await client.post("/auth/logout", json={"refresh_token": "never-existed"})
     assert response.status_code == 204
-

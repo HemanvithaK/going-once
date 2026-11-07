@@ -66,9 +66,11 @@ async def _get_visible_listing(
         raise _not_found()
     return listing
 
+
 def _not_found() -> HTTPException:
     """A fresh 404 per request: a shared exception object keeps growing its traceback."""
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="listing not found")
+
 
 async def _get_own_listing(session: AsyncSession, listing_id: uuid.UUID, user: User) -> Listing:
     """Load a listing the caller owns, or 404."""

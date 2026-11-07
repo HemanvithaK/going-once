@@ -293,6 +293,7 @@ async def test_mine_includes_drafts_and_excludes_other_sellers(
     titles = [item["title"] for item in (await client.get("/listings/mine", headers=seller)).json()]
     assert titles == ["my draft"]
 
+
 # --- timezones ------------------------------------------------------------
 
 
