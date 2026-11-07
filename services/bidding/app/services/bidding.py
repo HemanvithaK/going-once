@@ -56,6 +56,18 @@ async def current_leader(session: AsyncSession, listing_id: uuid.UUID) -> Bid | 
     )
 
 
+async def best_rival_ceiling(
+    session: AsyncSession, listing_id: uuid.UUID, bidder_id: uuid.UUID
+) -> Decimal | None:
+    """The highest ceiling held by anyone except this bidder. None when nobody else has bid."""
+    rival: Decimal | None = await session.scalar(
+        select(func.max(Bid.max_amount)).where(
+            Bid.listing_id == listing_id, Bid.bidder_id != bidder_id
+        )
+    )
+    return rival
+
+
 async def place_bid(
     session: AsyncSession,
     bidder_id: uuid.UUID,
@@ -132,15 +144,19 @@ async def place_bid(
             ends_at=auction.ends_at.isoformat(),
         )
 
-    # 5. Proxy pricing. The leader pays just enough to beat the next-highest
-    #    ceiling, and never more than their own ceiling.
+    # 5. Proxy pricing. The leader pays just enough to beat the best rival ceiling, and
+    #    never more than their own ceiling. The price depends on who bid what, never on
+    #    the order the bids arrived in.
     increment = auction.bid_increment
     if leader is None:
         new_leader_id = bidder_id
         new_price = auction.start_price
     elif leader.bidder_id == bidder_id:
+        # The leader raised their own ceiling. A rival's ceiling may now be further below
+        # it than the old price assumed, so the price is worked out again against it.
         new_leader_id = bidder_id
-        new_price = auction.current_price  # nobody else to beat
+        rival = await best_rival_ceiling(session, auction.listing_id, bidder_id)
+        new_price = auction.current_price if rival is None else min(max_amount, rival + increment)
     elif max_amount > leader.max_amount:
         new_leader_id = bidder_id
         new_price = min(max_amount, leader.max_amount + increment)
