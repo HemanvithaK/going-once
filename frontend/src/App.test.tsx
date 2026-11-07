@@ -19,7 +19,8 @@ describe('App', () => {
 
     renderApp()
 
-    expect(await screen.findByRole('heading', { name: 'Welcome, Ada' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(screen.getByText('Ada')).toBeInTheDocument()
     expect(server.refreshCalls).toHaveLength(1)
   })
 })

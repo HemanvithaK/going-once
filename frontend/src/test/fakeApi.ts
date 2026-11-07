@@ -82,6 +82,9 @@ export class FakeAuthServer {
       const token = bearerOf(init)?.replace('Bearer ', '') ?? ''
       return this.accessTokens.has(token) ? json(200, ada) : json(401, { detail: 'not authenticated' })
     }
+    if (path === '/listings') {
+      return json(200, { items: [], next_cursor: null })
+    }
     if (path === '/auth/logout') {
       return new Response(null, { status: 204 })
     }
@@ -98,5 +101,25 @@ export function fakeLocks() {
       queue = run.catch(() => undefined)
       return run
     },
+  }
+}
+
+/** A live listing as the API would send it. Override any field. */
+export function listing(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: crypto.randomUUID(),
+    seller_id: '6f1c2b8e-0000-4000-8000-000000000009',
+    title: 'Vintage camera',
+    description: '',
+    start_price: '100.00',
+    bid_increment: '5.00',
+    current_price: '125.00',
+    starts_at: '2026-11-06T10:00:00Z',
+    ends_at: new Date(Date.now() + 3 * 3_600_000).toISOString(),
+    status: 'live',
+    created_at: '2026-11-06T10:00:00Z',
+    has_reserve: false,
+    reserve_price: null,
+    ...overrides,
   }
 }

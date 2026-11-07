@@ -14,7 +14,8 @@ describe('LoginPage', () => {
     await user.type(screen.getByLabelText('Password'), 'correct horse battery')
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 
-    expect(await screen.findByRole('heading', { name: 'Welcome, Ada' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(screen.getByText('Ada')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument()
     expect(session.hasRefreshToken).toBe(true)
   })

@@ -22,9 +22,15 @@ describe('RegisterPage', () => {
 
     await fillIn('Ada', 'ada@example.com', 'correct horse battery')
 
-    expect(await screen.findByRole('heading', { name: 'Welcome, Ada' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(screen.getByText('Ada')).toBeInTheDocument()
     const paths = fetch.mock.calls.map(([input]) => new URL(String(input)).pathname)
-    expect(paths).toEqual(['/auth/register', '/auth/login', '/auth/me'])
+    // Register, then log in, then ask who we are. The auctions page loading after that is fine.
+    expect(paths.filter((path) => path.startsWith('/auth/'))).toEqual([
+      '/auth/register',
+      '/auth/login',
+      '/auth/me',
+    ])
     expect(bodyOf(fetch.mock.calls[0][1] as RequestInit)).toEqual({
       email: 'ada@example.com',
       password: 'correct horse battery',
