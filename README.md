@@ -94,6 +94,7 @@ checked by breaking the code on purpose and watching them fail:
 - random bid sequences match an independent model of the pricing rule (this found a real
   bug: raising your own ceiling used to leave the price stale)
 - the core API has no viewer WebSocket any more (checked end to end)
+- when Redis drops, connected viewers are told to reconnect instead of staying stale (the test cuts the real connection)
 
 ## Run it
 
@@ -144,8 +145,9 @@ docker-compose.yml
 - A new viewer cannot connect while bidding is down, because the first snapshot comes
   from bidding. Viewers already connected keep their stream.
 - Bidding trusts a valid JWT and does not check that the user is still active.
-- If Redis drops while viewers are connected, updates sent during the gap are not
-  replayed, so those viewers stay stale until the next change or until they reconnect.
+- If Redis drops, every connected viewer is closed with code 1013 and must reconnect for a
+  fresh snapshot, because updates sent during the gap are not replayed. A connection that
+  dies silently (no reset, as in a network partition) is only noticed on the next failed read.
 
 ## Not built yet
 

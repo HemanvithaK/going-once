@@ -12,7 +12,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
-from app.core.bidding_client import BiddingClient, BiddingUnavailableError, get_bidding_client
+from app.core.bidding_client import (
+    BiddingClient,
+    BiddingUnavailableError,
+    get_bidding_client,
+)
 from app.core.channels import auction_channel
 from app.core.hub import hub
 from app.core.logging import get_logger
@@ -23,7 +27,7 @@ router = APIRouter(tags=["realtime"])
 # Close codes 4000-4999 belong to the application. 1013 is the standard "try again later".
 CLOSE_NOT_FOUND = 4404  # bidding does not know this auction
 CLOSE_TOO_SLOW = 4008  # the viewer fell too far behind to keep up
-CLOSE_TRY_AGAIN = 1013  # bidding could not give the first snapshot
+CLOSE_TRY_AGAIN = 1013  # no snapshot from bidding, or updates may have been lost in Redis
 
 BiddingDep = Annotated[BiddingClient, Depends(get_bidding_client)]
 
@@ -68,9 +72,12 @@ async def watch_auction(
                     return
                 data = next_message.result()
                 if data is None:
-                    # The hub dropped us because our queue overflowed. The client should
-                    # reconnect, and its new snapshot brings it up to date.
-                    await websocket.close(code=CLOSE_TOO_SLOW)
+                    # The hub dropped us: either our queue overflowed, or Redis failed and we
+                    # may have missed updates. Either way the client should reconnect, and
+                    # its new snapshot brings it up to date. Redis being down is worth a
+                    # different code, because retrying at once will not help.
+                    code = CLOSE_TRY_AGAIN if subscriber.source_lost else CLOSE_TOO_SLOW
+                    await websocket.close(code=code)
                     return
                 version = _version_of(data)
                 if version is None or version <= newest_sent:

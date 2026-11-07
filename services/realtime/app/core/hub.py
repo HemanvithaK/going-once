@@ -4,6 +4,11 @@ Without this, every open socket holds its own Redis connection. With it, the fir
 viewer of an auction subscribes once, and every later viewer just joins the same list.
 Each viewer has a bounded queue. A viewer who stops reading fills its queue and is
 dropped, so it cannot slow the others or use memory without limit.
+
+Redis pub/sub keeps nothing for a connection that is down. redis-py reconnects and
+resubscribes by itself, but whatever was published during the gap is gone and nothing
+says so. So when a read fails, the hub drops every viewer. Each client reconnects, and
+its fresh snapshot brings it up to date.
 """
 
 import asyncio
@@ -27,6 +32,9 @@ class Subscriber:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_LIMIT)
         self.dropped = False
+        # True when Redis failed, so updates may be missing. False when the viewer was
+        # simply too slow. The socket uses it to pick the close code.
+        self.source_lost = False
 
 
 class ListingHub:
@@ -61,7 +69,12 @@ class ListingHub:
             if not viewers:
                 del self._viewers[channel]
                 if self._pubsub is not None:
-                    await self._pubsub.unsubscribe(channel)
+                    try:
+                        await self._pubsub.unsubscribe(channel)
+                    except Exception as exc:
+                        # Cleanup must not fail because Redis is down. If the channel stays
+                        # subscribed, a later viewer of it subscribes again harmlessly.
+                        log.warning("unsubscribe_failed", channel=channel, error=str(exc))
 
     def deliver(self, channel: str, data: str) -> None:
         """Hand one message to every viewer of a channel. Never waits."""
@@ -76,13 +89,24 @@ class ListingHub:
     def watcher_count(self, channel: str) -> int:
         return len(self._viewers.get(channel, ()))
 
-    def _drop(self, channel: str, subscriber: Subscriber) -> None:
+    def _drop(self, channel: str, subscriber: Subscriber, *, source_lost: bool = False) -> None:
         """Throw away a viewer's backlog and leave a single None to say it was dropped."""
         subscriber.dropped = True
+        subscriber.source_lost = source_lost
         while not subscriber.queue.empty():
             subscriber.queue.get_nowait()
         subscriber.queue.put_nowait(None)  # room is guaranteed: we just emptied the queue
-        log.warning("viewer_dropped_too_slow", channel=channel)
+        log.warning(
+            "viewer_dropped_redis_lost" if source_lost else "viewer_dropped_too_slow",
+            channel=channel,
+        )
+
+    def _drop_everyone(self) -> None:
+        """Redis failed, so no viewer can trust that it has seen every update."""
+        for channel, viewers in tuple(self._viewers.items()):
+            for subscriber in tuple(viewers):
+                if not subscriber.dropped:
+                    self._drop(channel, subscriber, source_lost=True)
 
     async def _read_forever(self, pubsub: PubSub) -> None:
         """Read Redis and fan each message out. A Redis error is logged, then retried."""
@@ -97,6 +121,7 @@ class ListingHub:
                     self.deliver(message["channel"], message["data"])
             except Exception as exc:
                 log.warning("hub_read_failed", error=str(exc))
+                self._drop_everyone()
                 await asyncio.sleep(1.0)
 
     async def close(self) -> None:

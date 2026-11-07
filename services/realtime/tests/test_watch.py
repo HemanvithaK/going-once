@@ -225,9 +225,7 @@ async def test_a_settled_status_reaches_the_watcher(
     async with connect(f"{realtime_url}/ws/listings/{listing_id}") as ws:
         assert (await receive(ws))["status"] == "live"
 
-        await Forwarder().handle(
-            update_bytes(listing_id, version=3, price="150.00", status="sold")
-        )
+        await Forwarder().handle(update_bytes(listing_id, version=3, price="150.00", status="sold"))
         final = await receive(ws)
 
     assert final["status"] == "sold"
